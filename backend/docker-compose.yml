@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: iotcommander
+      POSTGRES_USER: iotcommander
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iotcommander -d iotcommander"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: ./IoTCommander.Api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      IOT_API_KEY: ${IOT_API_KEY:?Set IOT_API_KEY}
+      ConnectionStrings__Database: Host=postgres;Port=5432;Database=iotcommander;Username=iotcommander;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
