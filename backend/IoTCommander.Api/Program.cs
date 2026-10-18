@@ -102,12 +102,56 @@ app.MapPost("/api/v1/terminals/{terminalId}/telemetry", async (
     return Results.Accepted($"/api/v1/terminals/{terminalId}/telemetry");
 });
 
-app.MapGet("/api/v1/terminals", async (CommanderDbContext database, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/terminals/{terminalId}/heartbeat", async (
+    string terminalId,
+    CommanderDbContext database,
+    CancellationToken cancellationToken) =>
 {
-    var terminals = await database.Terminals
+    if (!IsValidTerminalId(terminalId))
+    {
+        return Results.BadRequest(new
+        {
+            error = "Terminal ID must be a 12-character hexadecimal ID."
+        });
+    }
+
+    var terminal = await GetOrCreateTerminal(database, terminalId, cancellationToken);
+    terminal.LastSeenAt = DateTimeOffset.UtcNow;
+    await database.SaveChangesAsync(cancellationToken);
+
+    return Results.Accepted($"/api/v1/terminals/{terminalId}/heartbeat");
+});
+
+app.MapGet("/api/v1/terminals", async (
+    CommanderDbContext database,
+    CancellationToken cancellationToken) =>
+{
+    var now = DateTimeOffset.UtcNow;
+    var records = await database.Terminals
+        .AsNoTracking()
         .OrderByDescending(terminal => terminal.LastSeenAt)
-        .Select(terminal => new { terminal.Id, terminal.FirstSeenAt, terminal.LastSeenAt })
         .ToListAsync(cancellationToken);
+
+    var terminals = records.Select(terminal =>
+    {
+        var age = now - terminal.LastSeenAt;
+        var ageSeconds = Math.Max(0, (long)age.TotalSeconds);
+        var status = ageSeconds <= 60
+            ? "online"
+            : ageSeconds <= 180
+                ? "stale"
+                : "offline";
+
+        return new
+        {
+            terminal.Id,
+            terminal.FirstSeenAt,
+            terminal.LastSeenAt,
+            status,
+            lastSeenAgeSeconds = ageSeconds
+        };
+    });
+
     return Results.Ok(terminals);
 });
 
@@ -134,20 +178,63 @@ app.MapGet("/api/v1/terminals/{terminalId}/connections", async (
 app.MapGet("/api/v1/terminals/{terminalId}/telemetry", async (
     string terminalId,
     int? limit,
+    DateTimeOffset? from,
+    DateTimeOffset? to,
+    bool? ascending,
     CommanderDbContext database,
     CancellationToken cancellationToken) =>
 {
     if (!IsValidTerminalId(terminalId))
     {
-        return Results.BadRequest(new { error = "Terminal ID must be a 12-character hexadecimal ID." });
+        return Results.BadRequest(new
+        {
+            error = "Terminal ID must be a 12-character hexadecimal ID."
+        });
     }
+
+    if (from.HasValue && to.HasValue && from.Value > to.Value)
+    {
+        return Results.BadRequest(new
+        {
+            error = "'from' must be earlier than or equal to 'to'."
+        });
+    }
+
     var count = Math.Clamp(limit ?? 100, 1, 500);
-    var readings = await database.TelemetryRecords
-        .Where(item => item.TerminalId == terminalId)
+
+    IQueryable<TelemetryRecord> query = database.TelemetryRecords
+        .AsNoTracking()
+        .Where(item => item.TerminalId == terminalId);
+
+    if (from.HasValue)
+    {
+        query = query.Where(item => item.ReceivedAt >= from.Value);
+    }
+
+    if (to.HasValue)
+    {
+        query = query.Where(item => item.ReceivedAt <= to.Value);
+    }
+
+    var records = await query
         .OrderByDescending(item => item.ReceivedAt)
+        .ThenByDescending(item => item.Id)
         .Take(count)
-        .Select(item => new { item.Name, item.Value, item.Unit, item.ReceivedAt })
         .ToListAsync(cancellationToken);
+
+    if (ascending == true)
+    {
+        records.Reverse();
+    }
+
+    var readings = records.Select(item => new
+    {
+        item.Name,
+        item.Value,
+        item.Unit,
+        item.ReceivedAt
+    }).ToList();
+
     return Results.Ok(readings);
 });
 

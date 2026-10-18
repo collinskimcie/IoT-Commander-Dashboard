@@ -30,3 +30,6 @@ backend/.env
 # Logs and crash dumps
 *.log
 core_dump*
+
+# Machine-specific VS Code debug configuration
+/.vscode/launch.json

@@ -31,4 +31,8 @@ private:
     uint32_t _lastAttemptAt = 0;
     uint32_t _lastReadingRevision = 0;
     bool _hasSentReading = false;
+    uint32_t _lastHeartbeatAt = 0;
+    bool _hasSentHeartbeat = false;
+    uint32_t _lastTelemetrySnapshotAt = 0;
+    bool _hasSentTelemetrySnapshot = false;
 };

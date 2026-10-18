@@ -60,6 +60,23 @@ void BackendService::update(
     }
 
     _lastAttemptAt = millis();
+
+    // Send the first heartbeat as soon as possible, then every 30 seconds.
+    // This does not depend on sensor values changing.
+    constexpr uint32_t kHeartbeatIntervalMs = 30000;
+    if (!_hasSentHeartbeat ||
+        millis() - _lastHeartbeatAt >= kHeartbeatIntervalMs) {
+        if (post(
+                settings,
+                "/api/v1/terminals/" + _terminalId + "/heartbeat",
+                "{}")) {
+            _lastHeartbeatAt = millis();
+            _hasSentHeartbeat = true;
+        }
+        return;
+    }
+
+    // Drain queued connection transitions before routine reporting.
     if (!_pendingConnections.empty()) {
         const ConnectionEvent& event = _pendingConnections.front();
         JsonDocument document;
@@ -68,6 +85,7 @@ void BackendService::update(
         document["details"] = event.details;
         String body;
         serializeJson(document, body);
+
         if (post(
                 settings,
                 "/api/v1/terminals/" + _terminalId + "/connections",
@@ -77,7 +95,29 @@ void BackendService::update(
         return;
     }
 
-    if (readingRevision == 0 || (_hasSentReading && readingRevision == _lastReadingRevision)) {
+    // Send changed readings promptly and periodically snapshot unchanged values.
+    constexpr uint32_t kTelemetrySnapshotIntervalMs = 60000;
+
+    bool hasValidReading = false;
+    for (const TelemetryReading& reading : readings) {
+        if (reading.valid) {
+            hasValidReading = true;
+            break;
+        }
+    }
+
+    if (!hasValidReading) {
+        return;
+    }
+
+    const bool readingChanged =
+        readingRevision != 0 &&
+        (!_hasSentReading || readingRevision != _lastReadingRevision);
+    const bool snapshotDue =
+        !_hasSentTelemetrySnapshot ||
+        millis() - _lastTelemetrySnapshotAt >= kTelemetrySnapshotIntervalMs;
+
+    if (!readingChanged && !snapshotDue) {
         return;
     }
 
@@ -92,14 +132,18 @@ void BackendService::update(
         item["value"] = reading.value;
         item["unit"] = unit;
     }
+
     if (values.size() == 0) {
         return;
     }
+
     String body;
     serializeJson(document, body);
     if (post(settings, "/api/v1/terminals/" + _terminalId + "/telemetry", body)) {
         _lastReadingRevision = readingRevision;
         _hasSentReading = true;
+        _lastTelemetrySnapshotAt = millis();
+        _hasSentTelemetrySnapshot = true;
     }
 }
 
