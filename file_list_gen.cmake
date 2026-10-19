@@ -1,0 +1,9 @@
+list(
+  APPEND
+  LV_EDITOR_PROJECT_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/IoTCommander_gen.c
+  ${CMAKE_CURRENT_LIST_DIR}/IoTCommander.c
+  ${CMAKE_CURRENT_LIST_DIR}/screens/Alerts_gen.c
+  ${CMAKE_CURRENT_LIST_DIR}/screens/Dashboard_gen.c
+  ${CMAKE_CURRENT_LIST_DIR}/screens/Devices_gen.c
+  ${CMAKE_CURRENT_LIST_DIR}/screens/Settings_gen.c)

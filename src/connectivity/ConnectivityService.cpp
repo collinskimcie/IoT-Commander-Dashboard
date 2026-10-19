@@ -48,15 +48,27 @@ void ConnectivityService::update()
     }
 
     if (_wifiConnecting) {
-        if (WiFi.status() == WL_CONNECTED) {
+        if (connected) {
             _wifiConnecting = false;
+            _nextWifiRetryAt = millis() + 10000UL;
             _statusMessage = "Connected to " + WiFi.SSID();
         } else if (millis() - _connectStartedAt > kWifiConnectTimeoutMs) {
             _wifiConnecting = false;
-            _statusMessage = "Wi-Fi connection timed out";
+            _nextWifiRetryAt = millis() + 5000UL;
+            _statusMessage = "Wi-Fi connection timed out; retry scheduled";
         }
     } else if (connected && !_wifiScanning) {
         _statusMessage = "Connected to " + WiFi.SSID();
+    } else if (!connected &&
+               !_lastSsid.isEmpty() &&
+               !_wifiScanning &&
+               !_bluetoothScanning &&
+               static_cast<int32_t>(millis() - _nextWifiRetryAt) >= 0) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(_lastSsid.c_str(), _lastPassword.c_str());
+        _wifiConnecting = true;
+        _connectStartedAt = millis();
+        _statusMessage = "Reconnecting to " + _lastSsid;
     }
 }
 
@@ -107,10 +119,13 @@ bool ConnectivityService::connectWifi(const String& ssid, const String& password
         return false;
     }
 
+    _lastSsid = ssid;
+    _lastPassword = password;
     WiFi.disconnect(false);
-    WiFi.begin(ssid.c_str(), password.c_str());
+    WiFi.begin(_lastSsid.c_str(), _lastPassword.c_str());
     _wifiConnecting = true;
     _connectStartedAt = millis();
+    _nextWifiRetryAt = _connectStartedAt + kWifiConnectTimeoutMs + 5000UL;
     _statusMessage = "Connecting to " + ssid;
     return true;
 }

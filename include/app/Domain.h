@@ -4,7 +4,7 @@
 #include <array>
 #include <vector>
 
-constexpr uint8_t kMaxTelemetryReadings = 4;
+constexpr uint8_t kMaxTelemetryReadings = 5;
 
 enum class Transport : uint8_t {
     Wifi,
@@ -45,7 +45,7 @@ struct TerminalSettings {
     String backendUrl;
     String backendApiKey;
     String backendRootCa;
-    String timezone = "UTC-3";
+    String timezone = "EAT-3";
 };
 
 struct TelemetryReading {

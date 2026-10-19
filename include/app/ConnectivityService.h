@@ -38,6 +38,9 @@ private:
     bool _wifiConnecting = false;
     bool _previousWifiConnected = false;
     uint32_t _connectStartedAt = 0;
+    uint32_t _nextWifiRetryAt = 0;
+    String _lastSsid;
+    String _lastPassword;
     uint32_t _scanRevision = 0;
     String _statusMessage = "Ready to discover systems";
     std::vector<NearbyDevice> _nearbyDevices;

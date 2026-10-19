@@ -490,20 +490,9 @@ export default function App() {
             <div>
               <div className="eyebrow">TIME-SERIES EXPLORER</div>
               <h2>Telemetry analytics</h2>
-              <p>Historical readings reported by the selected terminal.</p>
+              <p>Up to five metrics reported by the selected terminal.</p>
             </div>
             <div className="chart-controls">
-              <label>
-                <span>Metric</span>
-                <select
-                  value={selectedMetric}
-                  onChange={(event) => setSelectedMetric(event.target.value)}
-                  disabled={metricNames.length === 0}
-                >
-                  {metricNames.length === 0 && <option value="">No metrics</option>}
-                  {metricNames.map((name) => <option key={name} value={name}>{name}</option>)}
-                </select>
-              </label>
               <label>
                 <span>Time range</span>
                 <select value={range} onChange={(event) => setRange(event.target.value)}>
@@ -513,77 +502,89 @@ export default function App() {
             </div>
           </div>
 
-          <div className="chart-summary">
-            <div>
-              <span className="summary-label">LATEST REPORTED VALUE</span>
-              <div className="chart-value">
-                {latestReading ? latestReading.value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '—'}
-                {latestReading?.unit && <span>{latestReading.unit}</span>}
-              </div>
-              <div className={`metric-freshness freshness-${latestFreshness.status}`}>
-                {latestFreshness.label} · {latestFreshness.age}
-              </div>
+          {!selectedId ? (
+            <div className="empty-state compact">Select a terminal to view telemetry charts.</div>
+          ) : metricNames.length === 0 ? (
+            <div className="empty-state compact">
+              <strong>No telemetry metrics yet</strong>
+              <p>Charts appear when the selected terminal reports real readings.</p>
             </div>
-            <div className="chart-points">{chartData.length} data points in range</div>
-          </div>
+          ) : (
+            <div className="telemetry-chart-grid">
+              {metricNames.slice(0, 5).map((metricName, index) => {
+                const points = telemetry
+                  .filter((item) => item.name === metricName)
+                  .map((item) => ({
+                    timestamp: item.receivedAt,
+                    time: formatTime(item.receivedAt),
+                    value: Number(item.value),
+                    unit: item.unit || ''
+                  }))
+                  .filter((item) => Number.isFinite(item.value));
 
-          <div className="chart-wrap">
-            {chartData.length === 0 ? (
-              <div className="empty-state chart-empty">
-                <div className="empty-icon">⌁</div>
-                <strong>No telemetry in this time range</strong>
-                <p>Choose another range or wait for the terminal to report readings.</p>
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 12, right: 18, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="telemetryFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#22c99a" stopOpacity={0.24} />
-                      <stop offset="95%" stopColor="#22c99a" stopOpacity={0.01} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="#e8edf2" strokeDasharray="4 5" vertical={false} />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fill: '#8491a2', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    minTickGap={28}
-                  />
-                  <YAxis
-                    width={58}
-                    tick={{ fill: '#8491a2', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    domain={['auto', 'auto']}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      border: '1px solid #e3e9ef',
-                      borderRadius: 10,
-                      boxShadow: '0 8px 24px #13263b12'
-                    }}
-                    labelStyle={{ color: '#657286', marginBottom: 4 }}
-                    formatter={(value, _name, item) => [
-                      `${Number(value).toLocaleString()} ${item.payload.unit}`.trim(),
-                      selectedMetric
-                    ]}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="value"
-                    stroke="#12a980"
-                    strokeWidth={2.5}
-                    fill="url(#telemetryFill)"
-                    dot={chartData.length < 25 ? { r: 3, fill: '#12a980', strokeWidth: 0 } : false}
-                    activeDot={{ r: 5, stroke: '#fff', strokeWidth: 2 }}
-                    isAnimationActive={false}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+                const latest = latestByMetric.find((item) => item.name === metricName);
+                const freshness = telemetryFreshness(latest, now);
+                const chartId = `telemetryFill${index}`;
+
+                return (
+                  <article className="telemetry-chart-card" key={metricName}>
+                    <div className="telemetry-chart-heading">
+                      <div>
+                        <h3>{metricName}</h3>
+                        <small className={`metric-freshness freshness-${freshness.status}`}>
+                          {freshness.label} · {freshness.age}
+                        </small>
+                      </div>
+                      <div className="telemetry-chart-value">
+                        {latest ? Number(latest.value).toLocaleString(undefined, { maximumFractionDigits: 3 }) : '—'}
+                        {latest?.unit && <span> {latest.unit}</span>}
+                      </div>
+                    </div>
+                    <div className="chart-points">{points.length} data points</div>
+                    <div className="chart-wrap">
+                      {points.length === 0 ? (
+                        <div className="empty-state chart-empty">
+                          <strong>No history in this range</strong>
+                          <p>Wait for readings or select a longer range.</p>
+                        </div>
+                      ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart data={points} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
+                            <defs>
+                              <linearGradient id={chartId} x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#22c99a" stopOpacity={0.24} />
+                                <stop offset="95%" stopColor="#22c99a" stopOpacity={0.01} />
+                              </linearGradient>
+                            </defs>
+                            <CartesianGrid stroke="#e8edf2" strokeDasharray="4 5" vertical={false} />
+                            <XAxis dataKey="time" tick={{ fill: '#8491a2', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={28} />
+                            <YAxis width={48} tick={{ fill: '#8491a2', fontSize: 10 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                            <Tooltip
+                              contentStyle={{ border: '1px solid #e3e9ef', borderRadius: 10 }}
+                              formatter={(value, _name, item) => [
+                                `${Number(value).toLocaleString()} ${item.payload.unit}`.trim(),
+                                metricName
+                              ]}
+                            />
+                            <Area
+                              type="monotone"
+                              dataKey="value"
+                              stroke="#12a980"
+                              strokeWidth={2}
+                              fill={`url(#${chartId})`}
+                              dot={points.length < 25 ? { r: 2, fill: '#12a980', strokeWidth: 0 } : false}
+                              activeDot={{ r: 4, stroke: '#fff', strokeWidth: 2 }}
+                              isAnimationActive={false}
+                            />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
 
           <div className="metric-strip">
             {latestByMetric.length === 0 ? (

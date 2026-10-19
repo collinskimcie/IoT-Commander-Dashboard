@@ -156,6 +156,10 @@ void setup()
     }
 
     connectivity.begin();
+    if (!settings.wifiSsid().isEmpty()) {
+        Serial.println("Attempting to reconnect to saved Wi-Fi");
+        connectivity.connectWifi(settings.wifiSsid(), settings.wifiPassword());
+    }
     mqtt.begin(notifications);
     backend.begin();
     backend.setConnection("wifi", "disconnected", "Waiting for a Wi-Fi connection.");

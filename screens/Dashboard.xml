@@ -1,0 +1,33 @@
+<screen>
+    <view width="240" height="320" style_bg_color="0x0B1220">
+        <lv_label x="12" y="12" text="IoT COMMANDER"
+                 style_text_color="0xFFFFFF"/>
+        <lv_label x="12" y="38" text="SYSTEM OVERVIEW"
+                 style_text_color="0x18C29C"/>
+
+        <lv_obj x="12" y="70" width="216" height="65"
+                style_bg_color="0x172235" style_radius="10">
+            <lv_label x="12" y="10" text="CONNECTED DEVICES"
+                     style_text_color="0xA8B7CC"/>
+            <lv_label x="12" y="32" text="0 ONLINE"
+                     style_text_color="0x18C29C"/>
+        </lv_obj>
+
+        <lv_obj x="12" y="145" width="216" height="65"
+                style_bg_color="0x172235" style_radius="10">
+            <lv_label x="12" y="10" text="TELEMETRY"
+                     style_text_color="0xA8B7CC"/>
+            <lv_label x="12" y="32" text="Waiting for data"
+                     style_text_color="0xFFFFFF"/>
+        </lv_obj>
+
+        <lv_obj x="12" y="220" width="216" height="48"
+                style_bg_color="0x172235" style_radius="10">
+            <lv_label x="12" y="14" text="NETWORK: CHECKING"
+                     style_text_color="0xF4C95D"/>
+        </lv_obj>
+
+        <lv_label x="12" y="288" text="IoT Commander | ESP32-S3"
+                 style_text_color="0xA8B7CC"/>
+    </view>
+</screen>

@@ -10,7 +10,13 @@ void TimeService::update(const String& timezone, bool wifiConnected)
         _timezone = timezone;
         _configured = false;
     }
-    if (!_configured && wifiConnected && !_timezone.isEmpty()) {
+    if (!wifiConnected) {
+        // Reconfigure NTP when connectivity returns.
+        _configured = false;
+        return;
+    }
+
+    if (!_configured && !_timezone.isEmpty()) {
         configTzTime(_timezone.c_str(), "pool.ntp.org", "time.google.com");
         _configured = true;
     }

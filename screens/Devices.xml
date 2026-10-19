@@ -1,0 +1,29 @@
+<screen>
+    <view width="240" height="320" style_bg_color="0x0B1220">
+        <lv_label x="12" y="12" text="DEVICES"
+                 style_text_color="0xFFFFFF"/>
+        <lv_label x="12" y="38" text="Device discovery and status"
+                 style_text_color="0x18C29C"/>
+
+        <lv_obj x="12" y="72" width="216" height="62"
+                style_bg_color="0x172235" style_radius="10">
+            <lv_label x="12" y="10" text="DEVICE 01"
+                     style_text_color="0xFFFFFF"/>
+            <lv_label x="12" y="34" text="Not connected"
+                     style_text_color="0xA8B7CC"/>
+        </lv_obj>
+
+        <lv_obj x="12" y="144" width="216" height="62"
+                style_bg_color="0x172235" style_radius="10">
+            <lv_label x="12" y="10" text="DEVICE 02"
+                     style_text_color="0xFFFFFF"/>
+            <lv_label x="12" y="34" text="Not connected"
+                     style_text_color="0xA8B7CC"/>
+        </lv_obj>
+
+        <lv_label x="12" y="230" text="Connect real devices"
+                 style_text_color="0x18C29C"/>
+        <lv_label x="12" y="288" text="IoT Commander"
+                 style_text_color="0xA8B7CC"/>
+    </view>
+</screen>

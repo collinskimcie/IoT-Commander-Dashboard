@@ -33,3 +33,13 @@ core_dump*
 
 # Machine-specific VS Code debug configuration
 /.vscode/launch.json
+
+# Local MQTT credentials and CA configuration
+/include/app/MqttLocalConfig.h
+
+# LVGL Pro Editor temporary preview output
+/preview-build/
+/preview-bin/
+
+# Local patch backups
+/.patch-backups/

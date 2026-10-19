@@ -7,6 +7,9 @@ public:
     bool begin();
     bool darkTheme() const;
     void setDarkTheme(bool enabled);
+    const String& wifiSsid() const;
+    const String& wifiPassword() const;
+    bool setWifiCredentials(const String& ssid, const String& password);
 
     const std::vector<SavedDevice>& devices() const;
     bool saveDevice(const NearbyDevice& device);
@@ -24,8 +27,12 @@ private:
     bool persistMqttSettings();
     void loadTerminalSettings();
     bool persistTerminalSettings();
+    void loadWifiSettings();
+    bool persistWifiSettings();
 
     bool _ready = false;
+    String _wifiSsid;
+    String _wifiPassword;
     bool _darkTheme = true;
     std::vector<SavedDevice> _devices;
     MqttSettings _mqttSettings;

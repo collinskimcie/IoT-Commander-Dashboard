@@ -1,0 +1,7 @@
+<globals>
+    <styles>
+        <style name="iotc_background" bg_color="0x0B1220"/>
+        <style name="iotc_panel" bg_color="0x172235"/>
+        <style name="iotc_accent" bg_color="0x18C29C"/>
+    </styles>
+</globals>

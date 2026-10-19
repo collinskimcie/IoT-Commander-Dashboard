@@ -37,6 +37,18 @@ void closeWifiOverlay()
     }
 }
 
+bool connectAndSaveWifi(const String& ssid, const String& password)
+{
+    if (screenContext == nullptr) {
+        return false;
+    }
+    if (!screenContext->settings.setWifiCredentials(ssid, password)) {
+        screenContext->notifications.push("Wi-Fi", "Could not save network credentials.");
+        return false;
+    }
+    return screenContext->connectivity.connectWifi(ssid, password);
+}
+
 void onWifiKeyboard(lv_event_t* event)
 {
     const lv_event_code_t code = lv_event_get_code(event);
@@ -49,7 +61,7 @@ void onWifiKeyboard(lv_event_t* event)
     }
 
     const String password = lv_textarea_get_text(passwordField);
-    if (screenContext->connectivity.connectWifi(selectedSsid, password)) {
+    if (connectAndSaveWifi(selectedSsid, password)) {
         screenContext->notifications.push("Wi-Fi", "Connecting to " + selectedSsid);
         closeWifiOverlay();
     }
@@ -59,7 +71,7 @@ void openWifiOverlay(const NearbyDevice& device)
 {
     selectedSsid = device.id;
     if (!device.secured) {
-        if (screenContext->connectivity.connectWifi(device.id, "")) {
+        if (connectAndSaveWifi(device.id, "")) {
             screenContext->notifications.push("Wi-Fi", "Connecting to " + device.name);
         }
         return;

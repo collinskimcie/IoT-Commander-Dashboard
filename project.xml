@@ -1,0 +1,7 @@
+<project name="IoTCommander" lvgl_version="9.5.0" theme="default">
+    <targets>
+        <target name="VieweSmart_240x320">
+            <display width="240" height="320"/>
+        </target>
+    </targets>
+</project>

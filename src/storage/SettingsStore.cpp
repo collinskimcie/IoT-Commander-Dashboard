@@ -1,3 +1,4 @@
+#include "app/MqttLocalConfig.h"
 #include "app/SettingsStore.h"
 
 #include <Preferences.h>
@@ -41,6 +42,7 @@ bool SettingsStore::begin()
     loadDevices();
     loadMqttSettings();
     loadTerminalSettings();
+    loadWifiSettings();
     return true;
 }
 
@@ -55,6 +57,34 @@ void SettingsStore::setDarkTheme(bool enabled)
     if (_ready) {
         preferences.putBool("dark", enabled);
     }
+}
+
+const String& SettingsStore::wifiSsid() const
+{
+    return _wifiSsid;
+}
+
+const String& SettingsStore::wifiPassword() const
+{
+    return _wifiPassword;
+}
+
+bool SettingsStore::setWifiCredentials(const String& ssid, const String& password)
+{
+    if (!_ready || ssid.isEmpty() || ssid.length() > 32 || password.length() > 63) {
+        return false;
+    }
+
+    const String previousSsid = _wifiSsid;
+    const String previousPassword = _wifiPassword;
+    _wifiSsid = ssid;
+    _wifiPassword = password;
+    if (!persistWifiSettings()) {
+        _wifiSsid = previousSsid;
+        _wifiPassword = previousPassword;
+        return false;
+    }
+    return true;
 }
 
 const std::vector<SavedDevice>& SettingsStore::devices() const
@@ -105,7 +135,7 @@ bool SettingsStore::setMqttSettings(const MqttSettings& settings)
 {
     if (settings.host.length() > 64 ||
         settings.username.length() > 32 ||
-        settings.password.length() > 32 ||
+        settings.password.length() > 64 ||
         settings.rootCa.length() > 2048 ||
         settings.telemetryTopic.length() > 96 ||
         settings.commandTopic.length() > 96 ||
@@ -149,6 +179,26 @@ bool SettingsStore::setTerminalSettings(const TerminalSettings& settings)
     return true;
 }
 
+void SettingsStore::loadWifiSettings()
+{
+    _wifiSsid = preferences.getString("wifi_ssid", "");
+    _wifiPassword = preferences.getString("wifi_pass", "");
+}
+
+bool SettingsStore::persistWifiSettings()
+{
+    if (!_ready) {
+        return false;
+    }
+
+    preferences.putString("wifi_ssid", _wifiSsid);
+    preferences.putString("wifi_pass", _wifiPassword);
+    return preferences.isKey("wifi_ssid") &&
+        preferences.getString("wifi_ssid", "") == _wifiSsid &&
+        preferences.isKey("wifi_pass") &&
+        preferences.getString("wifi_pass", "") == _wifiPassword;
+}
+
 void SettingsStore::loadDevices()
 {
     const uint8_t count = preferences.getUChar("device_count", 0);
@@ -183,6 +233,17 @@ void SettingsStore::loadMqttSettings()
     _mqttSettings.alertThreshold = preferences.isKey("mq_limit") ? preferences.getFloat("mq_limit") : 0.0F;
     _mqttSettings.alertEnabled = preferences.isKey("mq_alert") && preferences.getBool("mq_alert");
     _mqttSettings.tileEnabled = !preferences.isKey("mq_tile") || preferences.getBool("mq_tile");
+
+    // Seed the local broker configuration if no root CA has been saved yet.
+    // Existing configured MQTT settings remain untouched when a CA is present.
+    if (_mqttSettings.rootCa.length() == 0) {
+        _mqttSettings.host = MqttLocalConfig::host;
+        _mqttSettings.port = MqttLocalConfig::port;
+        _mqttSettings.username = MqttLocalConfig::username;
+        _mqttSettings.password = MqttLocalConfig::password;
+        _mqttSettings.rootCa = MqttLocalConfig::rootCa;
+        _mqttSettings.telemetryTopic = MqttLocalConfig::telemetryTopic;
+    }
 }
 
 bool SettingsStore::persistMqttSettings()
@@ -213,7 +274,11 @@ void SettingsStore::loadTerminalSettings()
     _terminalSettings.backendUrl = storedString("api_base", "");
     _terminalSettings.backendApiKey = storedString("api_key", "");
     _terminalSettings.backendRootCa = storedString("api_ca", "");
-    _terminalSettings.timezone = storedString("timezone", "UTC-3");
+    _terminalSettings.timezone = storedString("timezone", "EAT-3");
+    // UTC-3 is the equivalent legacy POSIX offset (UTC+3).
+    if (_terminalSettings.timezone == "UTC-3") {
+        _terminalSettings.timezone = "EAT-3";
+    }
 }
 
 bool SettingsStore::persistTerminalSettings()

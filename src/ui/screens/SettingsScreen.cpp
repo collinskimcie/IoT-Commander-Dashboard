@@ -242,7 +242,7 @@ lv_obj_t* createSettings(lv_obj_t* parent, ScreenContext& context)
 
     lv_obj_t* backend = uiCreateCard(page);
     uiCreateLabel(backend, "TIME AND BACKEND", 16);
-    createInput(backend, "POSIX timezone (UTC+3 = UTC-3)", editTerminalSettings.timezone, InputField::Timezone, false, false, 40);
+    createInput(backend, "POSIX timezone (Kenya: EAT-3 = UTC+3)", editTerminalSettings.timezone, InputField::Timezone, false, false, 40);
     createInput(backend, "Backend API base URL", editTerminalSettings.backendUrl, InputField::BackendUrl, false, false, 128);
     createInput(backend, "Backend API key", editTerminalSettings.backendApiKey, InputField::BackendKey, true, false, 64);
     createInput(backend, "Backend root CA certificate (PEM, HTTPS only)", editTerminalSettings.backendRootCa, InputField::BackendRootCa, false, true, 2048);

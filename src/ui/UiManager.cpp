@@ -6,17 +6,17 @@ namespace {
 
 lv_color_t primaryColor()
 {
-    return lv_color_hex(0x16A085);
+    return lv_color_hex(0x18C29C);
 }
 
 lv_color_t backgroundColor(bool dark)
 {
-    return dark ? lv_color_hex(0x101820) : lv_color_hex(0xF2F5F7);
+    return dark ? lv_color_hex(0x0B1220) : lv_color_hex(0xF2F5F7);
 }
 
 lv_color_t surfaceColor(bool dark)
 {
-    return dark ? lv_color_hex(0x15212B) : lv_color_hex(0xFFFFFF);
+    return dark ? lv_color_hex(0x172235) : lv_color_hex(0xFFFFFF);
 }
 
 } // namespace
@@ -81,6 +81,8 @@ bool UiManager::begin()
     lv_obj_set_style_pad_all(_content, 12, 0);
     lv_obj_set_style_pad_row(_content, 10, 0);
     lv_obj_set_flex_flow(_content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(_content, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
 
     _navigation = lv_obj_create(_root);
     lv_obj_set_size(_navigation, LV_PCT(100), 48);
