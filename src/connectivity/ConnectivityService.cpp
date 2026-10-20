@@ -37,6 +37,17 @@ void ConnectivityService::update()
     if (connected != _previousWifiConnected) {
         _statusMessage = connected ? "Connected to " + WiFi.SSID() : "Wi-Fi disconnected";
         _previousWifiConnected = connected;
+
+        if (connected) {
+            Serial.printf(
+                "[WiFi] Connected: SSID=%s, IP=%s, gateway=%s, RSSI=%d dBm\n",
+                WiFi.SSID().c_str(),
+                WiFi.localIP().toString().c_str(),
+                WiFi.gatewayIP().toString().c_str(),
+                WiFi.RSSI());
+        } else {
+            Serial.printf("[WiFi] Disconnected; status=%d\n", static_cast<int>(WiFi.status()));
+        }
     }
 
     if (_wifiScanning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
@@ -53,9 +64,17 @@ void ConnectivityService::update()
             _nextWifiRetryAt = millis() + 10000UL;
             _statusMessage = "Connected to " + WiFi.SSID();
         } else if (millis() - _connectStartedAt > kWifiConnectTimeoutMs) {
+            const int wifiStatus = static_cast<int>(WiFi.status());
+            Serial.printf(
+                "[WiFi] Connection timeout: SSID=%s, status=%d; retry scheduled\n",
+                _lastSsid.c_str(),
+                wifiStatus);
+            // Stop the failed station attempt before scheduling a retry.
+            WiFi.disconnect(false, false);
             _wifiConnecting = false;
             _nextWifiRetryAt = millis() + 5000UL;
-            _statusMessage = "Wi-Fi connection timed out; retry scheduled";
+            _statusMessage = "Wi-Fi connection timed out (status " +
+                String(wifiStatus) + "); retry scheduled";
         }
     } else if (connected && !_wifiScanning) {
         _statusMessage = "Connected to " + WiFi.SSID();
@@ -64,6 +83,9 @@ void ConnectivityService::update()
                !_wifiScanning &&
                !_bluetoothScanning &&
                static_cast<int32_t>(millis() - _nextWifiRetryAt) >= 0) {
+        // Reset the station state before starting another connection attempt.
+        WiFi.disconnect(false, false);
+        delay(100);
         WiFi.mode(WIFI_STA);
         WiFi.begin(_lastSsid.c_str(), _lastPassword.c_str());
         _wifiConnecting = true;
@@ -74,20 +96,42 @@ void ConnectivityService::update()
 
 bool ConnectivityService::startWifiScan()
 {
-    if (_wifiScanning || _bluetoothScanning || _wifiConnecting) {
+    if (_wifiScanning || _bluetoothScanning) {
         _statusMessage = "Wait for the current scan to finish";
         return false;
     }
 
+    // Pause automatic reconnect attempts while scanning.
+    _nextWifiRetryAt = millis() + 30000UL;
+    _wifiConnecting = false;
+
+    // Reset the Wi-Fi radio before scanning.
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
     WiFi.mode(WIFI_STA);
-    const int result = WiFi.scanNetworks(true, true);
-    if (result == WIFI_SCAN_FAILED) {
-        _statusMessage = "Could not start Wi-Fi scan";
+    delay(300);
+    WiFi.scanDelete();
+
+    Serial.printf("[WiFi] Starting synchronous scan; status=%d\n",
+                  static_cast<int>(WiFi.status()));
+
+    // Temporary diagnostic: wait for the scan to finish.
+    const int result = WiFi.scanNetworks(false, true);
+
+    Serial.printf("[WiFi] Synchronous scan result=%d, status=%d\n",
+                  result, static_cast<int>(WiFi.status()));
+
+    if (result < 0) {
+        _statusMessage = "Wi-Fi scan failed";
+        Serial.println("[WiFi] Synchronous scan failed");
         return false;
     }
 
     _wifiScanning = true;
-    _statusMessage = "Scanning for Wi-Fi networks";
+    finishWifiScan();
+
+    Serial.printf("[WiFi] Discovery complete; networks found=%d\n", result);
     return true;
 }
 
@@ -119,9 +163,15 @@ bool ConnectivityService::connectWifi(const String& ssid, const String& password
         return false;
     }
 
+    // Replace the active target and reset any previous station attempt.
     _lastSsid = ssid;
     _lastPassword = password;
-    WiFi.disconnect(false);
+    _wifiConnecting = false;
+
+    Serial.printf("[WiFi] Starting connection attempt: SSID=%s\n", ssid.c_str());
+    WiFi.disconnect(false, false);
+    delay(100);
+    WiFi.mode(WIFI_STA);
     WiFi.begin(_lastSsid.c_str(), _lastPassword.c_str());
     _wifiConnecting = true;
     _connectStartedAt = millis();
@@ -184,21 +234,29 @@ void ConnectivityService::finishWifiScan()
         return;
     }
 
+    // Replace previous Wi-Fi results, keeping discovered Bluetooth devices.
+    _nearbyDevices.erase(
+        std::remove_if(
+            _nearbyDevices.begin(),
+            _nearbyDevices.end(),
+            [](const NearbyDevice& device) {
+                return device.transport == Transport::Wifi;
+            }),
+        _nearbyDevices.end());
+
     for (int index = 0; index < count; ++index) {
         const String ssid = WiFi.SSID(index);
         if (ssid.isEmpty()) {
             continue;
         }
 
-        if (!containsDevice(_nearbyDevices, Transport::Wifi, ssid)) {
-            _nearbyDevices.push_back({
-                ssid,
-                ssid,
-                Transport::Wifi,
-                WiFi.RSSI(index),
-                WiFi.encryptionType(index) != WIFI_AUTH_OPEN
-            });
-        }
+        _nearbyDevices.push_back({
+            ssid,
+            ssid,
+            Transport::Wifi,
+            WiFi.RSSI(index),
+            WiFi.encryptionType(index) != WIFI_AUTH_OPEN
+        });
     }
     WiFi.scanDelete();
     ++_scanRevision;

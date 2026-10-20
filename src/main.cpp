@@ -156,6 +156,8 @@ void setup()
     }
 
     connectivity.begin();
+    Serial.printf("[WiFi] Saved SSID at startup: '%s'\n",
+                  settings.wifiSsid().c_str());
     if (!settings.wifiSsid().isEmpty()) {
         Serial.println("Attempting to reconnect to saved Wi-Fi");
         connectivity.connectWifi(settings.wifiSsid(), settings.wifiPassword());

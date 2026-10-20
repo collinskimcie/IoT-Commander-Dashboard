@@ -36,11 +36,48 @@ void readTouch(lv_indev_drv_t* driver, lv_indev_data_t* data)
     auto* touch = static_cast<esp_panel::drivers::Touch*>(driver->user_data);
     esp_panel::drivers::TouchPoint point;
 
+    static uint32_t polls = 0;
+    static uint32_t readFailures = 0;
+    static uint32_t detectedPoints = 0;
+    static bool wasPressed = false;
+
+    ++polls;
     data->state = LV_INDEV_STATE_RELEASED;
-    if (touch->readRawData(1, 0, 0) && touch->getPoints(&point, 1) > 0) {
+
+    const bool readOk = touch->readRawData(1, 0, 0);
+    const int count = readOk ? touch->getPoints(&point, 1) : 0;
+
+    if (!readOk) {
+        ++readFailures;
+    }
+
+    if (count > 0) {
+        ++detectedPoints;
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = point.x;
         data->point.y = point.y;
+
+        if (!wasPressed) {
+            ESP_LOGI(kLogTag, "TOUCH PRESS: x=%d y=%d", point.x, point.y);
+        }
+        wasPressed = true;
+    } else {
+        if (wasPressed) {
+            ESP_LOGI(kLogTag, "TOUCH RELEASE");
+        }
+        wasPressed = false;
+    }
+
+    if (polls >= 200) {
+        ESP_LOGI(
+            kLogTag,
+            "Touch diagnostics: polls=%lu read_failures=%lu detected_point_polls=%lu",
+            static_cast<unsigned long>(polls),
+            static_cast<unsigned long>(readFailures),
+            static_cast<unsigned long>(detectedPoints));
+        polls = 0;
+        readFailures = 0;
+        detectedPoints = 0;
     }
 }
 
