@@ -14,7 +14,29 @@ namespace {
 constexpr uint32_t kReconnectIntervalMs = 5000;
 constexpr uint32_t kAlertRepeatIntervalMs = 60000;
 constexpr size_t kMaxPayloadLength = 384;
+constexpr size_t kMaxPendingNotes = 8;
 MqttService* activeService = nullptr;
+
+class Guard {
+public:
+    explicit Guard(SemaphoreHandle_t handle) : _handle(handle)
+    {
+        if (_handle != nullptr) {
+            xSemaphoreTake(_handle, portMAX_DELAY);
+        }
+    }
+    ~Guard()
+    {
+        if (_handle != nullptr) {
+            xSemaphoreGive(_handle);
+        }
+    }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+private:
+    SemaphoreHandle_t _handle;
+};
 
 bool topicMatches(const String& filter, const char* topic)
 {
@@ -54,6 +76,7 @@ bool topicMatches(const String& filter, const char* topic)
 
 void MqttService::begin(NotificationCenter& notifications)
 {
+    _lock = xSemaphoreCreateMutex();
     _notifications = &notifications;
     activeService = this;
     _client.setCallback(onMessage);
@@ -69,7 +92,37 @@ void MqttService::begin(NotificationCenter& notifications)
     _clientId = clientId;
 }
 
-void MqttService::update(const MqttSettings& settings)
+void MqttService::notify(const String& title, const String& message)
+{
+    Guard guard(_lock);
+    if (_pendingNotes.size() >= kMaxPendingNotes) {
+        return;
+    }
+    _pendingNotes.push_back({title, message});
+}
+
+void MqttService::pump()
+{
+    std::vector<PendingNote> ready;
+    {
+        Guard guard(_lock);
+        if (_pendingNotes.empty()) {
+            return;
+        }
+        ready.swap(_pendingNotes);
+    }
+    for (const PendingNote& note : ready) {
+        _notifications->push(note.title, note.message);
+    }
+}
+
+void MqttService::service(const MqttSettings& settings)
+{
+    serviceInternal(settings);
+    _connected.store(_connectionAttempted);
+}
+
+void MqttService::serviceInternal(const MqttSettings& settings)
 {
     if (settingsChanged(settings)) {
         const bool connectionChanged =
@@ -91,12 +144,14 @@ void MqttService::update(const MqttSettings& settings)
             _connectionAttempted = false;
         }
         _settings = settings;
+        _hasCommandTopic.store(!_settings.commandTopic.isEmpty());
         if (_settings.rootCa.isEmpty()) {
             setStatus("Set broker root CA in Settings");
         } else {
             _network.setCACert(_settings.rootCa.c_str());
         }
         if (telemetryChanged) {
+            Guard guard(_lock);
             _hasReading = false;
             _readings = {};
         }
@@ -113,7 +168,7 @@ void MqttService::update(const MqttSettings& settings)
             }
         }
         if (wasConnected) {
-            _notifications->push("MQTT disconnected", "Broker settings changed.");
+            notify("MQTT disconnected", "Broker settings changed.");
         }
     }
 
@@ -143,7 +198,13 @@ void MqttService::update(const MqttSettings& settings)
         if (!_reportedConnection) {
             _reportedConnection = true;
             setStatus("Connected to " + _settings.host);
-            _notifications->push("MQTT connected", "Connected to " + _settings.host);
+            notify("MQTT connected", "Connected to " + _settings.host);
+        }
+        const int8_t command = _pendingCommand.exchange(-1);
+        if (command >= 0 && !_settings.commandTopic.isEmpty()) {
+            if (!_client.publish(_settings.commandTopic.c_str(), command == 1 ? "ON" : "OFF", false)) {
+                notify("MQTT command failed", "Check the broker and command topic.");
+            }
         }
         return;
     }
@@ -180,47 +241,56 @@ void MqttService::update(const MqttSettings& settings)
     _connectionAttempted = true;
     _reportedConnection = true;
     setStatus("Connected to " + _settings.host);
-    _notifications->push("MQTT connected", "Connected to " + _settings.host);
+    notify("MQTT connected", "Connected to " + _settings.host);
 }
 
-bool MqttService::connected()
+bool MqttService::connected() const
 {
-    return _connectionAttempted;
+    return _connected.load();
 }
 
 String MqttService::status() const
 {
+    Guard guard(_lock);
     return _status;
 }
 
 bool MqttService::hasReading() const
 {
+    Guard guard(_lock);
     return _hasReading;
 }
 
 float MqttService::reading() const
 {
+    Guard guard(_lock);
     return _reading;
 }
 
-const std::array<TelemetryReading, kMaxTelemetryReadings>& MqttService::readings() const
+std::array<TelemetryReading, kMaxTelemetryReadings> MqttService::readings() const
+{
+    Guard guard(_lock);
+    return _readings;
+}
+
+const std::array<TelemetryReading, kMaxTelemetryReadings>& MqttService::readingsUnsafe() const
 {
     return _readings;
 }
 
 uint32_t MqttService::readingRevision() const
 {
+    Guard guard(_lock);
     return _readingRevision;
 }
 
 bool MqttService::publishCommand(bool enabled)
 {
-    if (!_client.connected() || _settings.commandTopic.isEmpty()) {
+    if (!_connected.load() || !_hasCommandTopic.load()) {
         return false;
     }
-
-    const char* payload = enabled ? "ON" : "OFF";
-    return _client.publish(_settings.commandTopic.c_str(), payload, false);
+    _pendingCommand.store(enabled ? 1 : 0);
+    return true;
 }
 
 void MqttService::onMessage(char* topic, uint8_t* payload, unsigned int length)
@@ -261,7 +331,7 @@ void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsig
         if (end != valueText && *end == '\0' && std::isfinite(value)) {
             updateReading(_settings.tileLabel.c_str(), value);
         } else if (_lastNotificationAt == 0 || millis() - _lastNotificationAt > kAlertRepeatIntervalMs) {
-            _notifications->push("Invalid MQTT reading", "Use a numeric value or a JSON object of numeric readings.");
+            notify("Invalid MQTT reading", "Use a numeric value or a JSON object of numeric readings.");
             _lastNotificationAt = millis();
         }
     }
@@ -270,41 +340,50 @@ void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsig
 void MqttService::updateReading(const char* name, float value)
 {
     size_t index = _readings.size();
-    for (size_t candidate = 0; candidate < _readings.size(); ++candidate) {
-        if (_readings[candidate].valid && _readings[candidate].name == name) {
-            index = candidate;
-            break;
-        }
-        if (index == _readings.size() && !_readings[candidate].valid) {
-            index = candidate;
-        }
-    }
-    if (index == _readings.size()) {
-        index = 0;
-        for (size_t candidate = 1; candidate < _readings.size(); ++candidate) {
-            if (_readings[candidate].updatedAt < _readings[index].updatedAt) {
+    bool crossedThreshold = false;
+
+    {
+        Guard guard(_lock);
+
+        for (size_t candidate = 0; candidate < _readings.size(); ++candidate) {
+            if (_readings[candidate].valid && _readings[candidate].name == name) {
+                index = candidate;
+                break;
+            }
+
+            if (index == _readings.size() && !_readings[candidate].valid) {
                 index = candidate;
             }
         }
-    }
 
-    const bool crossedThreshold = _settings.alertEnabled &&
-        value >= _settings.alertThreshold &&
-        (!_readings[index].valid || _readings[index].name != name ||
-            _readings[index].value < _settings.alertThreshold);
-    _readings[index].name = name;
-    _readings[index].value = value;
-    _readings[index].updatedAt = millis();
-    _readings[index].valid = true;
-    _reading = value;
-    _hasReading = true;
-    ++_readingRevision;
+        if (index == _readings.size()) {
+            index = 0;
+            for (size_t candidate = 1; candidate < _readings.size(); ++candidate) {
+                if (_readings[candidate].updatedAt < _readings[index].updatedAt) {
+                    index = candidate;
+                }
+            }
+        }
+
+        crossedThreshold = _settings.alertEnabled &&
+            value >= _settings.alertThreshold &&
+            (!_readings[index].valid || _readings[index].name != name ||
+                _readings[index].value < _settings.alertThreshold);
+
+        _readings[index].name = name;
+        _readings[index].value = value;
+        _readings[index].updatedAt = millis();
+        _readings[index].valid = true;
+        _reading = value;
+        _hasReading = true;
+        ++_readingRevision;
+    }
 
     if (crossedThreshold) {
         const String message = String(name) + " reached " + String(value, 2) +
             (_settings.unit.isEmpty() ? "" : " " + _settings.unit) +
             " (limit " + String(_settings.alertThreshold, 2) + ")";
-        _notifications->push("MQTT threshold alert", message);
+        notify("MQTT threshold alert", message);
     }
 }
 
@@ -327,5 +406,6 @@ bool MqttService::settingsChanged(const MqttSettings& settings) const
 
 void MqttService::setStatus(const String& status)
 {
+    Guard guard(_lock);
     _status = status;
 }

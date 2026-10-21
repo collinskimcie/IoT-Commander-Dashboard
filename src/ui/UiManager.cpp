@@ -142,7 +142,7 @@ void UiManager::update()
     }
     {
         SlowGuard guard("mqtt.update");
-        _mqtt.update(_settings.mqttSettings());
+        _mqtt.pump();
     }
     {
         SlowGuard guard("time.update");

@@ -37,37 +37,56 @@ char usbCommand[kMaxUsbCommandLength];
 size_t usbCommandLength = 0;
 bool usbCommandOverflow = false;
 
-struct BackendSnapshot {
-    TerminalSettings settings;
+struct NetworkSnapshot {
+    TerminalSettings terminal;
+    MqttSettings mqtt;
     bool wifiConnected = false;
-    std::array<TelemetryReading, kMaxTelemetryReadings> readings;
-    String unit;
     uint32_t revision = 0;
 };
-BackendSnapshot backendSnapshot;
+NetworkSnapshot networkSnapshot;
 SemaphoreHandle_t snapshotLock = nullptr;
 
 void refreshBackendSnapshot(bool wifiConnected)
 {
     xSemaphoreTake(snapshotLock, portMAX_DELAY);
-    backendSnapshot.settings = settings.terminalSettings();
-    backendSnapshot.wifiConnected = wifiConnected;
-    backendSnapshot.readings = mqtt.readings();
-    backendSnapshot.unit = settings.mqttSettings().unit;
-    backendSnapshot.revision = mqtt.readingRevision();
+    networkSnapshot.terminal = settings.terminalSettings();
+    networkSnapshot.mqtt = settings.mqttSettings();
+    networkSnapshot.wifiConnected = wifiConnected;
+    ++networkSnapshot.revision;
     xSemaphoreGive(snapshotLock);
 }
 
-// Runs on core 0 so slow or failing network calls never block LVGL.
-void backendTask(void*)
+// One task owns all blocking network work (MQTT + backend), so LVGL never waits on it.
+// A single task also avoids a second large stack, which internal RAM cannot spare.
+void networkTask(void*)
 {
+    static NetworkSnapshot local;
+    uint32_t seenRevision = 0;
+    uint32_t lastReportAt = 0;
     for (;;) {
-        BackendSnapshot copy;
         xSemaphoreTake(snapshotLock, portMAX_DELAY);
-        copy = backendSnapshot;
+        if (networkSnapshot.revision != seenRevision) {
+            local = networkSnapshot;
+            seenRevision = networkSnapshot.revision;
+        }
         xSemaphoreGive(snapshotLock);
-        backend.update(copy.settings, copy.wifiConnected, copy.readings, copy.unit, copy.revision);
-        vTaskDelay(pdMS_TO_TICKS(500));
+
+        mqtt.service(local.mqtt);
+        backend.update(
+            local.terminal,
+            local.wifiConnected,
+            mqtt.readingsUnsafe(),
+            local.mqtt.unit,
+            mqtt.readingRevision());
+
+        if (millis() - lastReportAt >= 30000) {
+            lastReportAt = millis();
+            log_i("net task: stack free=%u heap free=%u maxblock=%u",
+                  static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -214,7 +233,7 @@ void setup()
 
     snapshotLock = xSemaphoreCreateMutex();
     refreshBackendSnapshot(connectivity.wifiConnected());
-    xTaskCreatePinnedToCore(backendTask, "backend", 20480, nullptr, 1, nullptr, 0);
+    xTaskCreatePinnedToCore(networkTask, "network", 20480, nullptr, 1, nullptr, 0);
 }
 
 void loop()
