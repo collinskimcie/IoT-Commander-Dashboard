@@ -43,3 +43,12 @@ core_dump*
 
 # Local patch backups
 /.patch-backups/
+.pio/
+.platformio-venv/
+.venv/
+preview-build/
+preview-bin/
+node_modules/
+web-dashboard/dist/
+*.bak
+.env
