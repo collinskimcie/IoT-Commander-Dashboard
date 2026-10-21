@@ -8,10 +8,15 @@
 #include "app/NotificationCenter.h"
 #include "app/SettingsStore.h"
 #include "app/TimeService.h"
+#include "app/SlowGuard.h"
 #include "platform/LvglPort.h"
 #include "ui/UiManager.h"
 
 #include <cstring>
+#include <array>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 namespace {
 
@@ -31,6 +36,40 @@ bool previousMqttConnected = false;
 char usbCommand[kMaxUsbCommandLength];
 size_t usbCommandLength = 0;
 bool usbCommandOverflow = false;
+
+struct BackendSnapshot {
+    TerminalSettings settings;
+    bool wifiConnected = false;
+    std::array<TelemetryReading, kMaxTelemetryReadings> readings;
+    String unit;
+    uint32_t revision = 0;
+};
+BackendSnapshot backendSnapshot;
+SemaphoreHandle_t snapshotLock = nullptr;
+
+void refreshBackendSnapshot(bool wifiConnected)
+{
+    xSemaphoreTake(snapshotLock, portMAX_DELAY);
+    backendSnapshot.settings = settings.terminalSettings();
+    backendSnapshot.wifiConnected = wifiConnected;
+    backendSnapshot.readings = mqtt.readings();
+    backendSnapshot.unit = settings.mqttSettings().unit;
+    backendSnapshot.revision = mqtt.readingRevision();
+    xSemaphoreGive(snapshotLock);
+}
+
+// Runs on core 0 so slow or failing network calls never block LVGL.
+void backendTask(void*)
+{
+    for (;;) {
+        BackendSnapshot copy;
+        xSemaphoreTake(snapshotLock, portMAX_DELAY);
+        copy = backendSnapshot;
+        xSemaphoreGive(snapshotLock);
+        backend.update(copy.settings, copy.wifiConnected, copy.readings, copy.unit, copy.revision);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
 
 void haltWithError(const char* message)
 {
@@ -172,12 +211,19 @@ void setup()
     }
     Serial.println("Touchscreen terminal ready");
     Serial.println("USB provisioning ready");
+
+    snapshotLock = xSemaphoreCreateMutex();
+    refreshBackendSnapshot(connectivity.wifiConnected());
+    xTaskCreatePinnedToCore(backendTask, "backend", 20480, nullptr, 1, nullptr, 0);
 }
 
 void loop()
 {
     updateUsbProvisioning();
-    ui.update();
+    {
+        SlowGuard guard("ui.update");
+        ui.update();
+    }
     const bool wifiConnected = connectivity.wifiConnected();
     if (wifiConnected != previousWifiConnected) {
         notifications.push(
@@ -197,13 +243,15 @@ void loop()
             mqttConnected ? settings.mqttSettings().host : "MQTT disconnected.");
         previousMqttConnected = mqttConnected;
     }
-    backend.update(
-        settings.terminalSettings(),
-        wifiConnected,
-        mqtt.readings(),
-        settings.mqttSettings().unit,
-        mqtt.readingRevision());
+    static uint32_t lastSnapshotAt = 0;
+    if (millis() - lastSnapshotAt >= 500) {
+        lastSnapshotAt = millis();
+        refreshBackendSnapshot(wifiConnected);
+    }
 
-    lvglPortHandle();
+    {
+        SlowGuard guard("lvglPortHandle");
+        lvglPortHandle();
+    }
     delay(5);
 }

@@ -2,6 +2,9 @@
 
 #include "ui/UiComponents.h"
 
+#include "app/BackendService.h"
+#include "app/SlowGuard.h"
+
 namespace {
 
 lv_color_t primaryColor()
@@ -74,7 +77,8 @@ bool UiManager::begin()
     lv_obj_set_style_text_color(_networkStatus, lv_color_hex(0xE6B566), 0);
 
     _content = lv_obj_create(_root);
-    lv_obj_set_size(_content, LV_PCT(100), LV_VER_RES_MAX - 96);
+    const lv_coord_t screenH = lv_disp_get_ver_res(lv_disp_get_default());
+    lv_obj_set_size(_content, LV_PCT(100), screenH - 96);
     lv_obj_set_pos(_content, 0, 48);
     lv_obj_set_style_radius(_content, 0, 0);
     lv_obj_set_style_border_width(_content, 0, 0);
@@ -86,7 +90,7 @@ bool UiManager::begin()
 
     _navigation = lv_obj_create(_root);
     lv_obj_set_size(_navigation, LV_PCT(100), 48);
-    lv_obj_set_pos(_navigation, 0, LV_VER_RES_MAX - 48);
+    lv_obj_set_pos(_navigation, 0, screenH - 48);
     lv_obj_set_style_radius(_navigation, 0, 0);
     lv_obj_set_style_border_width(_navigation, 0, 0);
     lv_obj_set_style_pad_all(_navigation, 2, 0);
@@ -132,20 +136,52 @@ bool UiManager::begin()
 
 void UiManager::update()
 {
-    _connectivity.update();
-    _mqtt.update(_settings.mqttSettings());
-    _time.update(_settings.terminalSettings().timezone, _connectivity.wifiConnected());
+    {
+        SlowGuard guard("connectivity.update");
+        _connectivity.update();
+    }
+    {
+        SlowGuard guard("mqtt.update");
+        _mqtt.update(_settings.mqttSettings());
+    }
+    {
+        SlowGuard guard("time.update");
+        _time.update(_settings.terminalSettings().timezone, _connectivity.wifiConnected());
+    }
     if (millis() - _lastUiRefresh < 100) {
         return;
     }
     _lastUiRefresh = millis();
-    lv_label_set_text(_networkStatus, _connectivity.wifiConnected() ? "ONLINE" : "OFFLINE");
-    lv_obj_set_style_text_color(
-        _networkStatus,
-        _connectivity.wifiConnected() ? lv_color_hex(0x65D6A5) : lv_color_hex(0xE6B566),
-        0);
+    const char* statusText = "OFFLINE";
+    lv_color_t statusColor = lv_color_hex(0xE6B566);
+    if (_connectivity.wifiConnected()) {
+        statusText = "ONLINE";
+        statusColor = lv_color_hex(0x65D6A5);
+        switch (backendStatus()) {
+        case BackendStatus::Connecting:
+            statusText = "CONNECTING";
+            statusColor = lv_color_hex(0xE6B566);
+            break;
+        case BackendStatus::Retrying:
+            statusText = "NO SERVER";
+            statusColor = lv_color_hex(0xE6B566);
+            break;
+        case BackendStatus::AuthFailed:
+            statusText = "BAD KEY";
+            statusColor = lv_color_hex(0xD84A4A);
+            break;
+        default:
+            break;
+        }
+    }
+    lv_label_set_text(_networkStatus, statusText);
+    lv_obj_set_style_text_color(_networkStatus, statusColor, 0);
     lv_label_set_text_fmt(_unreadBadge, "%u", static_cast<unsigned>(_notifications.unreadCount()));
-    lv_obj_add_flag(_unreadBadge, _notifications.unreadCount() == 0 ? LV_OBJ_FLAG_HIDDEN : 0);
+    if (_notifications.unreadCount() == 0) {
+        lv_obj_add_flag(_unreadBadge, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(_unreadBadge, LV_OBJ_FLAG_HIDDEN);
+    }
     moduleFor(_currentPage).update(_context);
 }
 
@@ -214,6 +250,7 @@ const ScreenModule& UiManager::moduleFor(AppPage page) const
 
 void UiManager::rebuildContent()
 {
+    SlowGuard guard("rebuildContent");
     const ScreenModule& module = moduleFor(_currentPage);
     module.destroy();
     lv_obj_clean(_content);

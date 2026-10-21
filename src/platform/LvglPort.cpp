@@ -1,5 +1,6 @@
 #include "platform/LvglPort.h"
 
+#include <Arduino.h>
 #include <esp_log.h>
 #include <lvgl.h>
 
@@ -51,27 +52,25 @@ void readTouch(lv_indev_drv_t* driver, lv_indev_data_t* data)
         ++readFailures;
     }
 
-    if (count > 0) {
+    if (count > 0 && point.x < 4000 && point.y < 4000) {
         ++detectedPoints;
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = point.x;
         data->point.y = point.y;
 
         if (!wasPressed) {
-            ESP_LOGI(kLogTag, "TOUCH PRESS: x=%d y=%d", point.x, point.y);
+            log_d("TOUCH PRESS: x=%d y=%d", point.x, point.y);
         }
         wasPressed = true;
     } else {
         if (wasPressed) {
-            ESP_LOGI(kLogTag, "TOUCH RELEASE");
+            log_d("TOUCH RELEASE");
         }
         wasPressed = false;
     }
 
     if (polls >= 200) {
-        ESP_LOGI(
-            kLogTag,
-            "Touch diagnostics: polls=%lu read_failures=%lu detected_point_polls=%lu",
+        log_d("Touch diagnostics: polls=%lu read_failures=%lu detected_point_polls=%lu",
             static_cast<unsigned long>(polls),
             static_cast<unsigned long>(readFailures),
             static_cast<unsigned long>(detectedPoints));

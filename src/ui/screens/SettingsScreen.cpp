@@ -2,6 +2,7 @@
 
 #include "ui/UiComponents.h"
 
+
 #include <cmath>
 #include <cstdlib>
 
@@ -51,8 +52,11 @@ lv_obj_t* createInput(
     lv_obj_set_width(input, LV_PCT(100));
     lv_obj_set_height(input, multiline ? 86 : 32);
     lv_textarea_set_one_line(input, !multiline);
-    lv_textarea_set_max_length(input, maxLength);
+    // Set the text BEFORE max length / password mode. With either active, LVGL 8
+    // inserts text one character at a time and re-lays out the page for each one,
+    // which froze the UI for ~34 s when the field held a PEM certificate.
     lv_textarea_set_text(input, value.c_str());
+    lv_textarea_set_max_length(input, maxLength);
     lv_textarea_set_password_mode(input, password);
     lv_obj_add_event_cb(input, [](lv_event_t* event) {
         if (lv_event_get_code(event) != LV_EVENT_CLICKED || keyboard == nullptr) {

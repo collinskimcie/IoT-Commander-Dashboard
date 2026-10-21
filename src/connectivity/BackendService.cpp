@@ -6,10 +6,43 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+
 namespace {
 
-constexpr uint32_t kRetryIntervalMs = 5000;
+constexpr uint32_t kBaseIntervalMs = 5000;
+constexpr uint32_t kMaxBackoffMs = 60000;
 constexpr size_t kMaxPendingConnections = 8;
+
+std::atomic<uint8_t> gStatus{static_cast<uint8_t>(BackendStatus::NotConfigured)};
+
+void setStatus(BackendStatus status)
+{
+    gStatus.store(static_cast<uint8_t>(status));
+}
+
+class Guard {
+public:
+    explicit Guard(SemaphoreHandle_t handle) : _handle(handle)
+    {
+        if (_handle != nullptr) {
+            xSemaphoreTake(_handle, portMAX_DELAY);
+        }
+    }
+    ~Guard()
+    {
+        if (_handle != nullptr) {
+            xSemaphoreGive(_handle);
+        }
+    }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+private:
+    SemaphoreHandle_t _handle;
+};
 
 String apiPath(const String& base, const String& path)
 {
@@ -22,8 +55,14 @@ String apiPath(const String& base, const String& path)
 
 } // namespace
 
+BackendStatus backendStatus()
+{
+    return static_cast<BackendStatus>(gStatus.load());
+}
+
 void BackendService::begin()
 {
+    _lock = xSemaphoreCreateMutex();
     char id[13];
     std::snprintf(id, sizeof(id), "%012llX", static_cast<unsigned long long>(ESP.getEfuseMac()));
     _terminalId = id;
@@ -34,6 +73,7 @@ void BackendService::setConnection(const char* type, const char* state, const St
     if (type == nullptr || state == nullptr) {
         return;
     }
+    Guard guard(_lock);
     if (!_pendingConnections.empty() &&
         _pendingConnections.back().type == type &&
         _pendingConnections.back().state == state &&
@@ -47,6 +87,33 @@ void BackendService::setConnection(const char* type, const char* state, const St
     _pendingConnections.push_back({type, state, details});
 }
 
+uint32_t BackendService::currentDelayMs() const
+{
+    if (_consecutiveFailures == 0) {
+        return kBaseIntervalMs;
+    }
+    const uint32_t shift = std::min<uint32_t>(_consecutiveFailures, 5);
+    return std::min<uint32_t>(kBaseIntervalMs << shift, kMaxBackoffMs);
+}
+
+void BackendService::noteResult(bool ok)
+{
+    if (ok) {
+        if (backendStatus() != BackendStatus::Ok) {
+            Serial.println("Backend connection OK");
+        }
+        _consecutiveFailures = 0;
+        setStatus(BackendStatus::Ok);
+        return;
+    }
+    if (_consecutiveFailures < 255) {
+        ++_consecutiveFailures;
+    }
+    const bool authProblem = _lastHttpCode == 401 || _lastHttpCode == 403;
+    setStatus(authProblem ? BackendStatus::AuthFailed : BackendStatus::Retrying);
+    Serial.printf("Backend retry in %lu s\n", static_cast<unsigned long>(currentDelayMs() / 1000));
+}
+
 void BackendService::update(
     const TerminalSettings& settings,
     bool wifiConnected,
@@ -54,22 +121,42 @@ void BackendService::update(
     const String& unit,
     uint32_t readingRevision)
 {
-    if (!validConfiguration(settings) || !wifiConnected ||
-        millis() - _lastAttemptAt < kRetryIntervalMs) {
+    if (!validConfiguration(settings)) {
+        setStatus(BackendStatus::NotConfigured);
+        return;
+    }
+    if (!wifiConnected) {
+        _wifiWasConnected = false;
         return;
     }
 
-    _lastAttemptAt = millis();
+    const uint32_t now = millis();
+
+    // New settings or a fresh Wi-Fi link: forget old failures and try right away.
+    if (!_wifiWasConnected ||
+        settings.backendUrl != _activeUrl ||
+        settings.backendApiKey != _activeKey) {
+        _wifiWasConnected = true;
+        _activeUrl = settings.backendUrl;
+        _activeKey = settings.backendApiKey;
+        _consecutiveFailures = 0;
+        _hasAttempted = false;
+        _hasSentHeartbeat = false;
+        setStatus(BackendStatus::Connecting);
+    }
+
+    if (_hasAttempted && now - _lastAttemptAt < currentDelayMs()) {
+        return;
+    }
+    _lastAttemptAt = now;
+    _hasAttempted = true;
 
     // Send the first heartbeat as soon as possible, then every 30 seconds.
-    // This does not depend on sensor values changing.
     constexpr uint32_t kHeartbeatIntervalMs = 30000;
-    if (!_hasSentHeartbeat ||
-        millis() - _lastHeartbeatAt >= kHeartbeatIntervalMs) {
-        if (post(
-                settings,
-                "/api/v1/terminals/" + _terminalId + "/heartbeat",
-                "{}")) {
+    if (!_hasSentHeartbeat || now - _lastHeartbeatAt >= kHeartbeatIntervalMs) {
+        const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/heartbeat", "{}");
+        noteResult(ok);
+        if (ok) {
             _lastHeartbeatAt = millis();
             _hasSentHeartbeat = true;
         }
@@ -77,8 +164,16 @@ void BackendService::update(
     }
 
     // Drain queued connection transitions before routine reporting.
-    if (!_pendingConnections.empty()) {
-        const ConnectionEvent& event = _pendingConnections.front();
+    ConnectionEvent event;
+    bool hasEvent = false;
+    {
+        Guard guard(_lock);
+        if (!_pendingConnections.empty()) {
+            event = _pendingConnections.front();
+            hasEvent = true;
+        }
+    }
+    if (hasEvent) {
         JsonDocument document;
         document["type"] = event.type;
         document["state"] = event.state;
@@ -86,11 +181,13 @@ void BackendService::update(
         String body;
         serializeJson(document, body);
 
-        if (post(
-                settings,
-                "/api/v1/terminals/" + _terminalId + "/connections",
-                body)) {
-            _pendingConnections.erase(_pendingConnections.begin());
+        const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/connections", body);
+        noteResult(ok);
+        if (ok) {
+            Guard guard(_lock);
+            if (!_pendingConnections.empty()) {
+                _pendingConnections.erase(_pendingConnections.begin());
+            }
         }
         return;
     }
@@ -105,7 +202,6 @@ void BackendService::update(
             break;
         }
     }
-
     if (!hasValidReading) {
         return;
     }
@@ -115,8 +211,7 @@ void BackendService::update(
         (!_hasSentReading || readingRevision != _lastReadingRevision);
     const bool snapshotDue =
         !_hasSentTelemetrySnapshot ||
-        millis() - _lastTelemetrySnapshotAt >= kTelemetrySnapshotIntervalMs;
-
+        now - _lastTelemetrySnapshotAt >= kTelemetrySnapshotIntervalMs;
     if (!readingChanged && !snapshotDue) {
         return;
     }
@@ -132,14 +227,15 @@ void BackendService::update(
         item["value"] = reading.value;
         item["unit"] = unit;
     }
-
     if (values.size() == 0) {
         return;
     }
 
     String body;
     serializeJson(document, body);
-    if (post(settings, "/api/v1/terminals/" + _terminalId + "/telemetry", body)) {
+    const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/telemetry", body);
+    noteResult(ok);
+    if (ok) {
         _lastReadingRevision = readingRevision;
         _hasSentReading = true;
         _lastTelemetrySnapshotAt = millis();
@@ -151,9 +247,17 @@ bool BackendService::post(const TerminalSettings& settings, const String& path, 
 {
     HTTPClient http;
     const String url = apiPath(settings.backendUrl, path);
+    http.setConnectTimeout(2500);
     http.setTimeout(3000);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("X-Api-Key", settings.backendApiKey);
+    _lastHttpCode = 0;
+
+    auto run = [&]() {
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("X-Api-Key", settings.backendApiKey);
+        const int code = http.POST(body);
+        http.end();
+        return code;
+    };
 
     int responseCode = 0;
     if (settings.backendUrl.startsWith("https://")) {
@@ -169,8 +273,7 @@ bool BackendService::post(const TerminalSettings& settings, const String& path, 
             Serial.println("ERROR: Could not initialize HTTPS backend request");
             return false;
         }
-        responseCode = http.POST(body);
-        http.end();
+        responseCode = run();
     } else {
         WiFiClient client;
         client.setConnectionTimeout(1500);
@@ -178,27 +281,39 @@ bool BackendService::post(const TerminalSettings& settings, const String& path, 
             Serial.println("ERROR: Could not initialize backend request");
             return false;
         }
-        responseCode = http.POST(body);
-        http.end();
+        responseCode = run();
     }
 
+    _lastHttpCode = responseCode;
     if (responseCode < 200 || responseCode >= 300) {
-        Serial.printf("ERROR: Backend request failed with HTTP status %d\n", responseCode);
+        if (responseCode < 0) {
+            Serial.printf(
+                "ERROR: Backend request failed: %s (%d)\n",
+                HTTPClient::errorToString(responseCode).c_str(),
+                responseCode);
+        } else {
+            Serial.printf("ERROR: Backend request failed with HTTP status %d\n", responseCode);
+        }
         return false;
     }
     return true;
 }
 
-bool BackendService::validConfiguration(const TerminalSettings& settings) const
+bool BackendService::validConfiguration(const TerminalSettings& settings)
 {
+    if (settings.backendUrl.isEmpty() && settings.backendApiKey.isEmpty()) {
+        _configErrorLogged = false;
+        return false;
+    }
     const bool supportedScheme =
         settings.backendUrl.startsWith("http://") || settings.backendUrl.startsWith("https://");
-    if (settings.backendUrl.isEmpty() && settings.backendApiKey.isEmpty()) {
-        return false;
-    }
     if (!supportedScheme || settings.backendApiKey.isEmpty()) {
-        Serial.println("ERROR: Backend URL must use HTTP(S) and an API key must be configured");
+        if (!_configErrorLogged) {
+            Serial.println("ERROR: Backend URL must use HTTP(S) and an API key must be configured");
+            _configErrorLogged = true;
+        }
         return false;
     }
+    _configErrorLogged = false;
     return true;
 }
