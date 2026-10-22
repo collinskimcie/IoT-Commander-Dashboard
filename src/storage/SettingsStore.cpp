@@ -20,13 +20,15 @@ String storedString(const char* key, const char* fallback)
     return preferences.isKey(key) ? preferences.getString(key) : String(fallback);
 }
 
+// Overwrites in place. NVS writes the new entry before retiring the old one, so a power
+// cut leaves the old or the new value, never nothing (removing the key first could lose the CA).
 bool storeString(const char* key, const String& value)
 {
-    if (preferences.isKey(key) && !preferences.remove(key)) {
-        return false;
-    }
     const size_t written = preferences.putString(key, value);
-    return value.isEmpty() ? (written == 0 && preferences.isKey(key)) : written == value.length();
+    if (value.isEmpty()) {
+        return written == 0 && preferences.isKey(key);
+    }
+    return written == value.length() && preferences.getString(key, "") == value;
 }
 
 } // namespace
@@ -234,9 +236,10 @@ void SettingsStore::loadMqttSettings()
     _mqttSettings.alertEnabled = preferences.isKey("mq_alert") && preferences.getBool("mq_alert");
     _mqttSettings.tileEnabled = !preferences.isKey("mq_tile") || preferences.getBool("mq_tile");
 
-    // Seed the local broker configuration if no root CA has been saved yet.
-    // Existing configured MQTT settings remain untouched when a CA is present.
-    if (_mqttSettings.rootCa.length() == 0) {
+    // Seed the build-time broker configuration only on a terminal that has never saved
+    // MQTT settings. Anything the user saved (even with an empty CA) is left alone.
+    const bool seeded = !preferences.isKey("mq_host");
+    if (seeded) {
         _mqttSettings.host = MqttLocalConfig::host;
         _mqttSettings.port = MqttLocalConfig::port;
         _mqttSettings.username = MqttLocalConfig::username;
@@ -244,6 +247,10 @@ void SettingsStore::loadMqttSettings()
         _mqttSettings.rootCa = MqttLocalConfig::rootCa;
         _mqttSettings.telemetryTopic = MqttLocalConfig::telemetryTopic;
     }
+    log_i("settings: mqtt %s, host_set=%d ca_bytes=%u",
+        seeded ? "seeded from build config" : "loaded from NVS",
+        _mqttSettings.host.isEmpty() ? 0 : 1,
+        static_cast<unsigned>(_mqttSettings.rootCa.length()));
 }
 
 bool SettingsStore::persistMqttSettings()
