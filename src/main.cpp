@@ -47,11 +47,18 @@ struct NetworkSnapshot {
 NetworkSnapshot networkSnapshot;
 SemaphoreHandle_t snapshotLock = nullptr;
 
+// Software watchdog: the network task stamps this every loop; loop() restarts the board if it stalls.
+volatile uint32_t networkHeartbeatAt = 0;
+constexpr uint32_t kNetworkStallLimitMs = 90000;
+constexpr uint32_t kStallMarker = 0x57A11ED0;
+RTC_NOINIT_ATTR uint32_t restartMarker;   // survives a software restart
+bool bootedAfterStall = false;
+
 const char* resetReasonName()
 {
     switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  return "poweron";
-    case ESP_RST_SW:       return "software";
+    case ESP_RST_SW:       return bootedAfterStall ? "net_stall" : "software";
     case ESP_RST_PANIC:    return "PANIC";
     case ESP_RST_INT_WDT:  return "INT_WDT";
     case ESP_RST_TASK_WDT: return "TASK_WDT";
@@ -138,6 +145,7 @@ void networkTask(void*)
                   backendStatusName(),
                   resetReasonName());
         }
+        networkHeartbeatAt = millis() | 1U;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -251,6 +259,11 @@ void setup()
     Serial.begin(115200);
     delay(100);
     Serial.println("Starting IoT Commander");
+    if (esp_reset_reason() == ESP_RST_SW && restartMarker == kStallMarker) {
+        bootedAfterStall = true;
+        Serial.println("Previous restart was caused by a network task stall");
+    }
+    restartMarker = 0;
 
     board.init();
     if (!board.begin()) {
@@ -291,6 +304,15 @@ void setup()
 void loop()
 {
     updateUsbProvisioning();
+    const uint32_t networkSeenAt = networkHeartbeatAt;
+    if (networkSeenAt != 0 && static_cast<int32_t>(millis() - networkSeenAt) > static_cast<int32_t>(kNetworkStallLimitMs)) {
+        Serial.printf("FATAL: network task stalled for %lu s; restarting\n",
+            static_cast<unsigned long>((millis() - networkSeenAt) / 1000UL));
+        Serial.flush();
+        restartMarker = kStallMarker;
+        delay(100);
+        esp_restart();
+    }
     {
         SlowGuard guard("ui.update");
         ui.update();
