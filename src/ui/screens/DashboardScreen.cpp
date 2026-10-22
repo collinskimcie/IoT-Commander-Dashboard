@@ -164,7 +164,7 @@ lv_obj_t* createDashboard(lv_obj_t* parent, ScreenContext& context)
     lv_obj_t* page = lv_obj_create(parent);
     lv_obj_set_size(page, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(page, 0, 0);
-    lv_obj_set_style_pad_row(page, 10, 0);
+    lv_obj_set_style_pad_row(page, 6, 0);
     lv_obj_set_style_border_width(page, 0, 0);
     lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);

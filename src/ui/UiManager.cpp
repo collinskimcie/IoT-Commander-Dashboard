@@ -85,6 +85,7 @@ bool UiManager::begin()
     lv_obj_set_style_pad_all(_content, 12, 0);
     lv_obj_set_style_pad_row(_content, 10, 0);
     lv_obj_set_flex_flow(_content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(_content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
 
@@ -102,10 +103,10 @@ bool UiManager::begin()
         AppPage page;
         const char* text;
     } entries[] = {
-        {AppPage::Dashboard, LV_SYMBOL_HOME " Home"},
-        {AppPage::Devices, LV_SYMBOL_LIST " Devices"},
-        {AppPage::Alerts, LV_SYMBOL_BELL " Alerts"},
-        {AppPage::Settings, LV_SYMBOL_SETTINGS " Setup"}
+        {AppPage::Dashboard, LV_SYMBOL_HOME},
+        {AppPage::Devices, LV_SYMBOL_LIST},
+        {AppPage::Alerts, LV_SYMBOL_BELL},
+        {AppPage::Settings, LV_SYMBOL_SETTINGS}
     };
     for (const auto& entry : entries) {
         lv_obj_t* button = lv_btn_create(_navigation);
@@ -192,6 +193,37 @@ void UiManager::show(AppPage page)
     }
     _currentPage = page;
     lv_label_set_text(_title, moduleFor(page).title);
+
+    // Keep navigation compact on the 240 px display and clearly mark
+    // the active destination without changing the navigation callbacks.
+    const bool dark = _settings.darkTheme();
+    const uint32_t selectedPage = static_cast<uint32_t>(page) + 1U;
+    const uint32_t childCount = lv_obj_get_child_cnt(_navigation);
+
+    for (uint32_t i = 0; i < childCount; ++i) {
+        lv_obj_t* button = lv_obj_get_child(_navigation, i);
+        const uint32_t buttonPage =
+            static_cast<uint32_t>(
+                reinterpret_cast<uintptr_t>(lv_obj_get_user_data(button)));
+
+        const bool selected = buttonPage == selectedPage;
+        lv_obj_set_style_bg_color(
+            button,
+            selected ? primaryColor() : surfaceColor(dark),
+            LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+
+        lv_obj_t* label = lv_obj_get_child(button, 0);
+        if (label != nullptr) {
+            lv_obj_set_style_text_color(
+                label,
+                selected ? lv_color_hex(0xFFFFFF)
+                         : (dark ? lv_color_hex(0xB7C5D8)
+                                 : lv_color_hex(0x526174)),
+                LV_PART_MAIN);
+        }
+    }
+
     rebuildContent();
 }
 
