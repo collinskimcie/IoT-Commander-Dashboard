@@ -94,15 +94,50 @@ app.MapPost("/api/v1/terminals/{terminalId}/telemetry", async (
     var terminal = await GetOrCreateTerminal(database, terminalId, cancellationToken);
     terminal.LastSeenAt = DateTimeOffset.UtcNow;
     var receivedAt = DateTimeOffset.UtcNow;
-    terminal.LatestReadings = MergeLatest(terminal.LatestReadings, request.Readings, receivedAt);
-    database.TelemetryRecords.AddRange(request.Readings.Select(reading => new TelemetryRecord
+
+    // Store-and-forward: a reading may carry the time it was observed. Trust it only when plausible.
+    (DateTimeOffset At, bool Observed) ResolveTime(ReadingIngestRequest reading)
     {
-        TerminalId = terminalId,
-        Name = reading.Name,
-        Value = reading.Value,
-        Unit = reading.Unit ?? string.Empty,
-        ReceivedAt = receivedAt
-    }));
+        if (reading.ObservedAt is { } seconds && seconds > 0 && seconds < 253402300799)
+        {
+            var observed = DateTimeOffset.FromUnixTimeSeconds(seconds);
+            if (observed >= receivedAt.AddDays(-7) && observed <= receivedAt.AddMinutes(5))
+            {
+                return (observed > receivedAt ? receivedAt : observed, true);
+            }
+        }
+        return (receivedAt, false);
+    }
+
+    var stamped = request.Readings.Select(reading => (Reading: reading, Time: ResolveTime(reading))).ToList();
+
+    // A retry after a lost response must not store the same reading twice.
+    var observedTimes = stamped.Where(item => item.Time.Observed).Select(item => item.Time.At).Distinct().ToList();
+    var alreadyStored = new HashSet<(string, DateTimeOffset)>();
+    if (observedTimes.Count > 0)
+    {
+        var rows = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(
+            database.TelemetryRecords
+                .Where(item => item.TerminalId == terminalId && observedTimes.Contains(item.ReceivedAt))
+                .Select(item => new { item.Name, item.ReceivedAt }),
+            cancellationToken);
+        foreach (var row in rows)
+        {
+            alreadyStored.Add((row.Name, row.ReceivedAt));
+        }
+    }
+
+    terminal.LatestReadings = MergeLatest(terminal.LatestReadings, stamped.Select(item => (item.Reading, item.Time.At)));
+    database.TelemetryRecords.AddRange(stamped
+        .Where(item => !alreadyStored.Contains((item.Reading.Name, item.Time.At)))
+        .Select(item => new TelemetryRecord
+        {
+            TerminalId = terminalId,
+            Name = item.Reading.Name,
+            Value = item.Reading.Value,
+            Unit = item.Reading.Unit ?? string.Empty,
+            ReceivedAt = item.Time.At
+        }));
     await database.SaveChangesAsync(cancellationToken);
     return Results.Accepted($"/api/v1/terminals/{terminalId}/telemetry");
 });
@@ -416,11 +451,16 @@ static List<LatestReading> ParseLatest(string? json)
     }
 }
 
-static string MergeLatest(string? existing, IEnumerable<ReadingIngestRequest> incoming, DateTimeOffset at)
+static string MergeLatest(string? existing, IEnumerable<(ReadingIngestRequest Reading, DateTimeOffset At)> incoming)
 {
     var map = ParseLatest(existing).ToDictionary(item => item.Name);
-    foreach (var reading in incoming)
+    foreach (var (reading, at) in incoming)
     {
+        // A replayed older reading must not replace a fresher stored value.
+        if (map.TryGetValue(reading.Name, out var current) && current.At > at)
+        {
+            continue;
+        }
         map[reading.Name] = new LatestReading(reading.Name, reading.Value, reading.Unit ?? string.Empty, at);
     }
     return System.Text.Json.JsonSerializer.Serialize(map.Values.OrderBy(item => item.Name).Take(8));

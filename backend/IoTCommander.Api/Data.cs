@@ -90,7 +90,7 @@ public sealed class TelemetryRecord
 
 public sealed record ConnectionIngestRequest(string Type, string State, string Details);
 public sealed record TelemetryIngestRequest(IReadOnlyList<ReadingIngestRequest> Readings);
-public sealed record ReadingIngestRequest(string Name, double Value, string? Unit = null);
+public sealed record ReadingIngestRequest(string Name, double Value, string? Unit = null, long? ObservedAt = null);
 
 public sealed class HeartbeatRecord
 {
