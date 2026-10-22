@@ -3,6 +3,8 @@ using System.Text;
 using IoTCommander.Api;
 using Microsoft.EntityFrameworkCore;
 
+const int MaxReadingsPerPost = 5; // keep in sync with kMaxTelemetryReadings in Domain.h
+
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 8192);
 
@@ -74,7 +76,7 @@ app.MapPost("/api/v1/terminals/{terminalId}/telemetry", async (
 {
     if (!IsValidTerminalId(terminalId) ||
         request.Readings is null ||
-        request.Readings.Count is < 1 or > 4 ||
+        request.Readings.Count < 1 || request.Readings.Count > MaxReadingsPerPost ||
         request.Readings.Any(reading =>
             string.IsNullOrWhiteSpace(reading.Name) ||
             reading.Name.Length > 24 ||
@@ -83,7 +85,7 @@ app.MapPost("/api/v1/terminals/{terminalId}/telemetry", async (
     {
         return Results.ValidationProblem(new Dictionary<string, string[]>
         {
-            ["readings"] = ["Provide between one and four named, finite numeric readings."]
+            ["readings"] = [$"Provide between 1 and {MaxReadingsPerPost} named, finite numeric readings."]
         });
     }
 
