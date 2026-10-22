@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis
 } from 'recharts';
+import { FleetOverview, HealthPanel } from './Fleet';
 
 const REFRESH_MS = 15000;
 const RANGES = [
@@ -415,6 +416,8 @@ export default function App() {
           </article>
         </section>
 
+        <FleetOverview devices={devices} selectedId={selectedId} onSelect={setSelectedId} />
+
         <section className="content-grid">
           <article className="panel device-panel" id="devices">
             <div className="panel-heading">
@@ -446,7 +449,7 @@ export default function App() {
                     >
                       <span className={`device-avatar avatar-${status}`}>⌁</span>
                       <span className="device-info">
-                        <strong>{device.id}</strong>
+                        <strong>{device.name || device.id}</strong>
                         <small>Last seen {ageLabel(device)}</small>
                       </span>
                       <StatusPill status={status} />
@@ -478,6 +481,7 @@ export default function App() {
                 <div className="selected-note">
                   Status is inferred from the backend's last-seen timestamp. MQTT connectivity is shown separately in connection events.
                 </div>
+                <HealthPanel device={selectedDevice} onChanged={() => loadData()} />
               </>
             ) : (
               <div className="empty-state compact">Select a registered device to view its details.</div>

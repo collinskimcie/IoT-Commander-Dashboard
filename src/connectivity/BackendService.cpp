@@ -1,6 +1,8 @@
 #include "app/BackendService.h"
 
 #include <Arduino.h>
+#include <esp_system.h>
+#include <esp_timer.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -50,6 +52,40 @@ bool permanentlyRejected(int code)
 {
     return code >= 400 && code < 500 &&
         code != 401 && code != 403 && code != 408 && code != 429;
+}
+
+#ifndef FW_VERSION
+#define FW_VERSION "0.2.0"
+#endif
+
+const char* resetReasonText()
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "poweron";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:  return "int_wdt";
+    case ESP_RST_TASK_WDT: return "task_wdt";
+    case ESP_RST_WDT:      return "wdt";
+    case ESP_RST_BROWNOUT: return "brownout";
+    default:               return "other";
+    }
+}
+
+// Health snapshot sent with every heartbeat so the dashboard can show device health.
+String heartbeatBody()
+{
+    JsonDocument document;
+    document["fw"] = FW_VERSION;
+    document["uptimeSeconds"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000LL);
+    document["heapFree"] = static_cast<uint32_t>(ESP.getFreeHeap());
+    document["heapMaxBlock"] = static_cast<uint32_t>(ESP.getMaxAllocHeap());
+    document["psramFree"] = static_cast<uint32_t>(ESP.getFreePsram());
+    document["rssi"] = WiFi.RSSI();
+    document["resetReason"] = resetReasonText();
+    String body;
+    serializeJson(document, body);
+    return body;
 }
 
 String apiPath(const String& base, const String& path)
@@ -162,7 +198,7 @@ void BackendService::update(
     // Send the first heartbeat as soon as possible, then every 30 seconds.
     constexpr uint32_t kHeartbeatIntervalMs = 30000;
     if (!_hasSentHeartbeat || now - _lastHeartbeatAt >= kHeartbeatIntervalMs) {
-        const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/heartbeat", "{}");
+        const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/heartbeat", heartbeatBody());
         noteResult(ok);
         if (ok) {
             _lastHeartbeatAt = millis();

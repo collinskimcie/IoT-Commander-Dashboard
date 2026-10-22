@@ -1,0 +1,36 @@
+.fleet-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .fleet-layout { grid-template-columns: 1fr; } }
+.fleet-group + .fleet-group { margin-top: 14px; }
+.fleet-group-title { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8491a2; margin-bottom: 8px; }
+.fleet-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.fleet-tile { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 12px; border: 1px solid #e3e9ef; border-radius: 12px; background: #fff; cursor: pointer; font: inherit; color: inherit; }
+.fleet-tile:hover { border-color: #12a980; }
+.fleet-tile.selected { border-color: #12a980; box-shadow: 0 0 0 2px rgba(18, 169, 128, .18); }
+.tile-top { display: flex; align-items: center; gap: 8px; }
+.tile-top strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.tile-meta { font-size: 12px; color: #8491a2; text-transform: capitalize; }
+.quick-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick-chip { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: #f2f5f7; color: #526174; }
+.quick-chip b { color: #0b1220; }
+.quick-chip.muted { background: transparent; color: #8491a2; padding-left: 0; }
+.signal-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; }
+.signal-bars span { width: 3px; border-radius: 1px; background: #d5dde6; }
+.signal-bars span.on { background: #12a980; }
+.mesh-svg { width: 100%; max-width: 280px; height: auto; }
+.mesh-hub { fill: #0b1220; }
+.mesh-hub-label { fill: #fff; font-size: 11px; font-weight: 600; }
+.mesh-node { cursor: pointer; outline: none; }
+.mesh-node:focus-visible circle { stroke: #12a980; }
+.mesh-label { font-size: 10px; fill: #526174; }
+.health-panel { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.health-title { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8491a2; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.health-item { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.health-item span { color: #8491a2; font-size: 11px; }
+.health-chart { height: 130px; }
+.health-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.health-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #8491a2; }
+.health-form input { padding: 7px 9px; border: 1px solid #e3e9ef; border-radius: 8px; font: inherit; }
+.health-form button { padding: 8px 14px; border: 0; border-radius: 8px; background: #12a980; color: #fff; font: inherit; cursor: pointer; }
+.health-form button:disabled { opacity: .6; cursor: default; }
