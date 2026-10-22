@@ -44,6 +44,14 @@ private:
     SemaphoreHandle_t _handle;
 };
 
+// A 4xx the server will never accept: retrying the same body cannot succeed.
+// 401/403 (bad key), 408 (timeout) and 429 (rate limit) are transient or fixable.
+bool permanentlyRejected(int code)
+{
+    return code >= 400 && code < 500 &&
+        code != 401 && code != 403 && code != 408 && code != 429;
+}
+
 String apiPath(const String& base, const String& path)
 {
     String result = base;
@@ -182,8 +190,12 @@ void BackendService::update(
         serializeJson(document, body);
 
         const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/connections", body);
-        noteResult(ok);
-        if (ok) {
+        const bool dropped = !ok && permanentlyRejected(_lastHttpCode);
+        if (dropped) {
+            Serial.printf("Backend rejected connection event (HTTP %d); dropping it\n", _lastHttpCode);
+        }
+        noteResult(ok || dropped);
+        if (ok || dropped) {
             Guard guard(_lock);
             if (!_pendingConnections.empty()) {
                 _pendingConnections.erase(_pendingConnections.begin());
@@ -234,8 +246,12 @@ void BackendService::update(
     String body;
     serializeJson(document, body);
     const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/telemetry", body);
-    noteResult(ok);
-    if (ok) {
+    const bool dropped = !ok && permanentlyRejected(_lastHttpCode);
+    if (dropped) {
+        Serial.printf("Backend rejected telemetry (HTTP %d); skipping this revision\n", _lastHttpCode);
+    }
+    noteResult(ok || dropped);
+    if (ok || dropped) {
         _lastReadingRevision = readingRevision;
         _hasSentReading = true;
         _lastTelemetrySnapshotAt = millis();
