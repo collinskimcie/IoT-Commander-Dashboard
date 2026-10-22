@@ -155,6 +155,7 @@ bool SettingsStore::setMqttSettings(const MqttSettings& settings)
         _mqttSettings = previous;
         return false;
     }
+    ++_revision;
     return true;
 }
 
@@ -178,6 +179,7 @@ bool SettingsStore::setTerminalSettings(const TerminalSettings& settings)
         _terminalSettings = previous;
         return false;
     }
+    ++_revision;
     return true;
 }
 

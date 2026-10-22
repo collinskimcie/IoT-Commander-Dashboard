@@ -73,14 +73,32 @@ const char* backendStatusName()
     return "?";
 }
 
+// Copies the settings (two PEM roots plus the broker and backend strings, several KB) into
+// the network snapshot only when they changed or Wi-Fi flipped, not on every call.
 void refreshBackendSnapshot(bool wifiConnected)
 {
+    static bool haveCopy = false;
+    static uint32_t copiedRevision = 0;
+    static bool copiedWifi = false;
+    const uint32_t settingsRevision = settings.revision();
+    if (haveCopy && settingsRevision == copiedRevision && wifiConnected == copiedWifi) {
+        return;
+    }
+
     xSemaphoreTake(snapshotLock, portMAX_DELAY);
-    networkSnapshot.terminal = settings.terminalSettings();
-    networkSnapshot.mqtt = settings.mqttSettings();
+    if (!haveCopy || settingsRevision != copiedRevision) {
+        networkSnapshot.terminal = settings.terminalSettings();
+        networkSnapshot.mqtt = settings.mqttSettings();
+    }
     networkSnapshot.wifiConnected = wifiConnected;
     ++networkSnapshot.revision;
     xSemaphoreGive(snapshotLock);
+
+    haveCopy = true;
+    copiedRevision = settingsRevision;
+    copiedWifi = wifiConnected;
+    log_i("net snapshot refreshed: settings rev=%u wifi=%s",
+          static_cast<unsigned>(settingsRevision), wifiConnected ? "up" : "down");
 }
 
 // One task owns all blocking network work (MQTT + backend), so LVGL never waits on it.

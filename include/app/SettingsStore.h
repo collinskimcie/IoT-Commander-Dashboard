@@ -20,6 +20,9 @@ public:
     const TerminalSettings& terminalSettings() const;
     bool setTerminalSettings(const TerminalSettings& settings);
 
+    // Bumped whenever the MQTT or terminal settings change, so consumers copy only on change.
+    uint32_t revision() const { return _revision; }
+
 private:
     void loadDevices();
     bool persistDevices();
@@ -37,4 +40,5 @@ private:
     std::vector<SavedDevice> _devices;
     MqttSettings _mqttSettings;
     TerminalSettings _terminalSettings;
+    uint32_t _revision = 1;
 };
