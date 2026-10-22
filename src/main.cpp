@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_system.h>
 #include <ArduinoJson.h>
 #include <esp_display_panel.hpp>
 
@@ -46,6 +47,32 @@ struct NetworkSnapshot {
 NetworkSnapshot networkSnapshot;
 SemaphoreHandle_t snapshotLock = nullptr;
 
+const char* resetReasonName()
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "poweron";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_PANIC:    return "PANIC";
+    case ESP_RST_INT_WDT:  return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT:      return "WDT";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    default:               return "other";
+    }
+}
+
+const char* backendStatusName()
+{
+    switch (backendStatus()) {
+    case BackendStatus::NotConfigured: return "not-configured";
+    case BackendStatus::Connecting:    return "connecting";
+    case BackendStatus::Ok:            return "ok";
+    case BackendStatus::Retrying:      return "retrying";
+    case BackendStatus::AuthFailed:    return "auth-failed";
+    }
+    return "?";
+}
+
 void refreshBackendSnapshot(bool wifiConnected)
 {
     xSemaphoreTake(snapshotLock, portMAX_DELAY);
@@ -81,10 +108,17 @@ void networkTask(void*)
 
         if (millis() - lastReportAt >= 30000) {
             lastReportAt = millis();
-            log_i("net task: stack free=%u heap free=%u maxblock=%u",
+            log_i("net task: stack free=%u heap free=%u maxblock=%u psram free=%u/%u "
+                  "wifi=%s mqtt=%s backend=%s reset=%s",
                   static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
                   static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()),
+                  static_cast<unsigned>(ESP.getFreePsram()),
+                  static_cast<unsigned>(ESP.getPsramSize()),
+                  local.wifiConnected ? "up" : "down",
+                  mqtt.connected() ? "up" : "down",
+                  backendStatusName(),
+                  resetReasonName());
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
