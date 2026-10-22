@@ -53,6 +53,7 @@ private:
     MqttSettings _settings;            // network task only
     String _status = "Configure MQTT in Settings";   // guarded by _lock
     String _clientId;
+    String _statusTopic;   // retained online/offline marker (also the last-will topic)
     uint32_t _lastReconnectAttempt = 0;
     uint32_t _lastNotificationAt = 0;
     float _reading = 0.0F;             // guarded by _lock

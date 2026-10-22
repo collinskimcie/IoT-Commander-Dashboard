@@ -15,6 +15,7 @@ constexpr uint32_t kReconnectIntervalMs = 5000;
 constexpr uint32_t kAlertRepeatIntervalMs = 60000;
 constexpr size_t kMaxPayloadLength = 384;
 constexpr size_t kMaxPendingNotes = 8;
+constexpr bool kStatusEnabled = true;   // last-will + retained online/offline; false if the broker ACL rejects it
 MqttService* activeService = nullptr;
 
 class Guard {
@@ -90,6 +91,11 @@ void MqttService::begin(NotificationCenter& notifications)
     std::snprintf(clientId, sizeof(clientId), "IoTCmd-%08lX",
         static_cast<unsigned long>(ESP.getEfuseMac() & 0xFFFFFFFF));
     _clientId = clientId;
+
+    char statusTopic[48];
+    std::snprintf(statusTopic, sizeof(statusTopic), "iot-commander/%012llX/status",
+        static_cast<unsigned long long>(ESP.getEfuseMac()));
+    _statusTopic = statusTopic;
 }
 
 void MqttService::notify(const String& title, const String& message)
@@ -139,6 +145,9 @@ void MqttService::serviceInternal(const MqttSettings& settings)
         const bool wasConnected = connectionChanged && _connectionAttempted;
         if (connectionChanged) {
             if (_connectionAttempted) {
+                if (kStatusEnabled) {
+                    _client.publish(_statusTopic.c_str(), "offline", true);
+                }
                 _client.disconnect();
             }
             _connectionAttempted = false;
@@ -216,15 +225,11 @@ void MqttService::serviceInternal(const MqttSettings& settings)
     _lastReconnectAttempt = millis();
     setStatus("Connecting to " + _settings.host);
 
-    bool connected = false;
-    if (_settings.username.isEmpty()) {
-        connected = _client.connect(_clientId.c_str());
-    } else {
-        connected = _client.connect(
-            _clientId.c_str(),
-            _settings.username.c_str(),
-            _settings.password.c_str());
-    }
+    const char* user = _settings.username.isEmpty() ? nullptr : _settings.username.c_str();
+    const char* pass = _settings.username.isEmpty() ? nullptr : _settings.password.c_str();
+    const char* willTopic = kStatusEnabled ? _statusTopic.c_str() : nullptr;
+    const bool connected = _client.connect(
+        _clientId.c_str(), user, pass, willTopic, 1, true, "offline");
 
     if (!connected) {
         setStatus("MQTT connection failed (" + String(_client.state()) + ")");
@@ -239,6 +244,9 @@ void MqttService::serviceInternal(const MqttSettings& settings)
     }
 
     _connectionAttempted = true;
+    if (kStatusEnabled) {
+        _client.publish(_statusTopic.c_str(), "online", true);
+    }
     _reportedConnection = true;
     setStatus("Connected to " + _settings.host);
     notify("MQTT connected", "Connected to " + _settings.host);
@@ -305,6 +313,10 @@ void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsig
     if (topic == nullptr) {
         Serial.println("[MQTT] Received message with null topic");
         return;
+    }
+
+    if (_statusTopic == topic) {
+        return;   // our own retained online/offline marker
     }
 
     Serial.printf("[MQTT] RX topic='%s' length=%u\n", topic, length);
