@@ -17,6 +17,21 @@ namespace {
 constexpr uint32_t kBaseIntervalMs = 5000;
 constexpr uint32_t kMaxBackoffMs = 60000;
 constexpr size_t kMaxPendingConnections = 8;
+constexpr uint32_t kDrainIntervalMs = 400;   // gap between queued events while the link is healthy
+constexpr bool kReuseConnection = true;      // keep-alive; false = one connection per request
+
+// One long-lived HTTP client so the TCP/TLS session is reused between posts.
+HTTPClient gHttp;
+WiFiClient gPlain;
+WiFiClientSecure gSecure;
+String gConnectionBase;
+
+void closeConnection()
+{
+    gHttp.end();
+    gPlain.stop();
+    gSecure.stop();
+}
 
 std::atomic<uint8_t> gStatus{static_cast<uint8_t>(BackendStatus::NotConfigured)};
 
@@ -170,6 +185,9 @@ void BackendService::update(
         return;
     }
     if (!wifiConnected) {
+        if (_wifiWasConnected) {
+            closeConnection();
+        }
         _wifiWasConnected = false;
         return;
     }
@@ -189,7 +207,15 @@ void BackendService::update(
         setStatus(BackendStatus::Connecting);
     }
 
-    if (_hasAttempted && now - _lastAttemptAt < currentDelayMs()) {
+    // Drain queued connection events quickly while the link is healthy; otherwise honour the backoff.
+    size_t queued = 0;
+    {
+        Guard guard(_lock);
+        queued = _pendingConnections.size();
+    }
+    const uint32_t gateMs =
+        (_consecutiveFailures == 0 && queued > 0) ? kDrainIntervalMs : currentDelayMs();
+    if (_hasAttempted && now - _lastAttemptAt < gateMs) {
         return;
     }
     _lastAttemptAt = now;
@@ -297,43 +323,54 @@ void BackendService::update(
 
 bool BackendService::post(const TerminalSettings& settings, const String& path, const String& body)
 {
-    HTTPClient http;
     const String url = apiPath(settings.backendUrl, path);
-    http.setConnectTimeout(2500);
-    http.setTimeout(3000);
+    const bool secure = settings.backendUrl.startsWith("https://");
     _lastHttpCode = 0;
 
-    auto run = [&]() {
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Api-Key", settings.backendApiKey);
-        const int code = http.POST(body);
-        http.end();
+    if (secure && settings.backendRootCa.isEmpty()) {
+        Serial.println("ERROR: HTTPS backend requires a configured root CA certificate");
+        return false;
+    }
+
+    // A different backend cannot reuse the open connection.
+    if (settings.backendUrl != gConnectionBase) {
+        closeConnection();
+        gConnectionBase = settings.backendUrl;
+    }
+
+    auto attempt = [&](WiFiClient& client) -> int {
+        if (secure) {
+            // Re-point at the current CA string: the settings snapshot may have been reallocated.
+            gSecure.setCACert(settings.backendRootCa.c_str());
+            gSecure.setHandshakeTimeout(3);
+        }
+        client.setConnectionTimeout(1500);
+        gHttp.setReuse(kReuseConnection);
+        gHttp.setConnectTimeout(2500);
+        gHttp.setTimeout(3000);
+        if (!gHttp.begin(client, url)) {
+            Serial.println("ERROR: Could not initialize backend request");
+            return HTTPC_ERROR_CONNECTION_REFUSED;
+        }
+        gHttp.addHeader("Content-Type", "application/json");
+        gHttp.addHeader("X-Api-Key", settings.backendApiKey);
+        const int code = gHttp.POST(body);
+        if (code > 0) {
+            (void)gHttp.getString();   // read the reply so the connection can be reused
+        }
+        gHttp.end();
         return code;
     };
 
-    int responseCode = 0;
-    if (settings.backendUrl.startsWith("https://")) {
-        if (settings.backendRootCa.isEmpty()) {
-            Serial.println("ERROR: HTTPS backend requires a configured root CA certificate");
-            return false;
-        }
-        WiFiClientSecure client;
-        client.setConnectionTimeout(1500);
-        client.setHandshakeTimeout(3);
-        client.setCACert(settings.backendRootCa.c_str());
-        if (!http.begin(client, url)) {
-            Serial.println("ERROR: Could not initialize HTTPS backend request");
-            return false;
-        }
-        responseCode = run();
-    } else {
-        WiFiClient client;
-        client.setConnectionTimeout(1500);
-        if (!http.begin(client, url)) {
-            Serial.println("ERROR: Could not initialize backend request");
-            return false;
-        }
-        responseCode = run();
+    const bool wasOpen = secure ? gSecure.connected() : gPlain.connected();
+    int responseCode = secure ? attempt(gSecure) : attempt(gPlain);
+    if (responseCode < 0 && wasOpen) {
+        // The server may have closed an idle keep-alive connection: retry once on a fresh one.
+        closeConnection();
+        responseCode = secure ? attempt(gSecure) : attempt(gPlain);
+    }
+    if (responseCode < 0 || !kReuseConnection) {
+        closeConnection();
     }
 
     _lastHttpCode = responseCode;
