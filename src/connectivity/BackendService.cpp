@@ -11,12 +11,69 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <ctime>
 
 namespace {
 
 constexpr uint32_t kBaseIntervalMs = 5000;
 constexpr uint32_t kMaxBackoffMs = 60000;
 constexpr size_t kMaxPendingConnections = 8;
+constexpr uint32_t kTelemetrySnapshotIntervalMs = 60000;
+constexpr size_t kReadingQueueCapacity = 512;   // about 24 KB, allocated in PSRAM
+
+// Store-and-forward: readings wait here until the backend has accepted them.
+struct QueuedReading {
+    char name[25];
+    char unit[9];
+    float value;
+    uint32_t at;   // Unix seconds; 0 when the clock was not yet synchronized
+};
+QueuedReading* gReadingQueue = nullptr;
+size_t gQueueHead = 0;    // index of the oldest entry
+size_t gQueueCount = 0;
+uint32_t gQueueDropped = 0;
+
+bool queueReady()
+{
+    static bool allocationFailed = false;
+    if (gReadingQueue == nullptr && !allocationFailed) {
+        gReadingQueue = static_cast<QueuedReading*>(
+            ps_malloc(sizeof(QueuedReading) * kReadingQueueCapacity));
+        if (gReadingQueue == nullptr) {
+            allocationFailed = true;
+            Serial.println("ERROR: Could not allocate the telemetry queue in PSRAM");
+        }
+    }
+    return gReadingQueue != nullptr;
+}
+
+void queuePush(const QueuedReading& item)
+{
+    if (!queueReady()) {
+        return;
+    }
+    if (gQueueCount == kReadingQueueCapacity) {
+        gQueueHead = (gQueueHead + 1) % kReadingQueueCapacity;
+        --gQueueCount;
+        if (++gQueueDropped == 1) {
+            Serial.println("WARNING: telemetry queue full; dropping the oldest readings");
+        }
+    }
+    gReadingQueue[(gQueueHead + gQueueCount) % kReadingQueueCapacity] = item;
+    ++gQueueCount;
+}
+
+const QueuedReading& queueAt(size_t index)
+{
+    return gReadingQueue[(gQueueHead + index) % kReadingQueueCapacity];
+}
+
+void queuePop(size_t count)
+{
+    count = std::min(count, gQueueCount);
+    gQueueHead = (gQueueHead + count) % kReadingQueueCapacity;
+    gQueueCount -= count;
+}
 constexpr uint32_t kDrainIntervalMs = 400;   // gap between queued events while the link is healthy
 constexpr bool kReuseConnection = true;      // keep-alive; false = one connection per request
 
@@ -70,7 +127,7 @@ bool permanentlyRejected(int code)
 }
 
 #ifndef FW_VERSION
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0"
 #endif
 
 const char* resetReasonText()
@@ -180,6 +237,41 @@ void BackendService::update(
     const String& unit,
     uint32_t readingRevision)
 {
+    // Store readings as they change (and as a periodic snapshot), even while offline.
+    {
+        const uint32_t queuedAt = millis();
+        bool hasValid = false;
+        for (const TelemetryReading& reading : readings) {
+            if (reading.valid) {
+                hasValid = true;
+                break;
+            }
+        }
+        const bool changed = readingRevision != 0 &&
+            (!_hasSentReading || readingRevision != _lastReadingRevision);
+        const bool snapshotDue = !_hasSentTelemetrySnapshot ||
+            queuedAt - _lastTelemetrySnapshotAt >= kTelemetrySnapshotIntervalMs;
+        if (hasValid && (changed || snapshotDue)) {
+            const time_t wall = time(nullptr);
+            const uint32_t stamp = wall > 1700000000 ? static_cast<uint32_t>(wall) : 0;
+            for (const TelemetryReading& reading : readings) {
+                if (!reading.valid) {
+                    continue;
+                }
+                QueuedReading item = {};
+                std::snprintf(item.name, sizeof(item.name), "%s", reading.name.c_str());
+                std::snprintf(item.unit, sizeof(item.unit), "%s", unit.c_str());
+                item.value = reading.value;
+                item.at = stamp;
+                queuePush(item);
+            }
+            _lastReadingRevision = readingRevision;
+            _hasSentReading = true;
+            _lastTelemetrySnapshotAt = queuedAt;
+            _hasSentTelemetrySnapshot = true;
+        }
+    }
+
     if (!validConfiguration(settings)) {
         setStatus(BackendStatus::NotConfigured);
         return;
@@ -214,7 +306,7 @@ void BackendService::update(
         queued = _pendingConnections.size();
     }
     const uint32_t gateMs =
-        (_consecutiveFailures == 0 && queued > 0) ? kDrainIntervalMs : currentDelayMs();
+        (_consecutiveFailures == 0 && (queued > 0 || gQueueCount > 0)) ? kDrainIntervalMs : currentDelayMs();
     if (_hasAttempted && now - _lastAttemptAt < gateMs) {
         return;
     }
@@ -266,58 +358,38 @@ void BackendService::update(
         return;
     }
 
-    // Send changed readings promptly and periodically snapshot unchanged values.
-    constexpr uint32_t kTelemetrySnapshotIntervalMs = 60000;
-
-    bool hasValidReading = false;
-    for (const TelemetryReading& reading : readings) {
-        if (reading.valid) {
-            hasValidReading = true;
-            break;
-        }
-    }
-    if (!hasValidReading) {
+    // Drain stored readings oldest first; remove them only once the backend has them.
+    if (gQueueCount == 0) {
         return;
     }
-
-    const bool readingChanged =
-        readingRevision != 0 &&
-        (!_hasSentReading || readingRevision != _lastReadingRevision);
-    const bool snapshotDue =
-        !_hasSentTelemetrySnapshot ||
-        now - _lastTelemetrySnapshotAt >= kTelemetrySnapshotIntervalMs;
-    if (!readingChanged && !snapshotDue) {
-        return;
-    }
-
+    const size_t batch = std::min<size_t>(gQueueCount, kMaxTelemetryReadings);
     JsonDocument document;
     JsonArray values = document["readings"].to<JsonArray>();
-    for (const TelemetryReading& reading : readings) {
-        if (!reading.valid) {
-            continue;
+    for (size_t index = 0; index < batch; ++index) {
+        const QueuedReading& item = queueAt(index);
+        JsonObject entry = values.add<JsonObject>();
+        entry["name"] = item.name;
+        entry["value"] = item.value;
+        entry["unit"] = item.unit;
+        if (item.at != 0) {
+            entry["observedAt"] = item.at;
         }
-        JsonObject item = values.add<JsonObject>();
-        item["name"] = reading.name;
-        item["value"] = reading.value;
-        item["unit"] = unit;
     }
-    if (values.size() == 0) {
-        return;
-    }
-
     String body;
     serializeJson(document, body);
+
     const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/telemetry", body);
     const bool dropped = !ok && permanentlyRejected(_lastHttpCode);
     if (dropped) {
-        Serial.printf("Backend rejected telemetry (HTTP %d); skipping this revision\n", _lastHttpCode);
+        Serial.printf("Backend rejected telemetry (HTTP %d); dropping %u readings\n",
+            _lastHttpCode, static_cast<unsigned>(batch));
     }
     noteResult(ok || dropped);
     if (ok || dropped) {
-        _lastReadingRevision = readingRevision;
-        _hasSentReading = true;
-        _lastTelemetrySnapshotAt = millis();
-        _hasSentTelemetrySnapshot = true;
+        queuePop(batch);
+        if (ok && gQueueCount > 0) {
+            Serial.printf("Backend: %u stored readings left to send\n", static_cast<unsigned>(gQueueCount));
+        }
     }
 }
 
