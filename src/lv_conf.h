@@ -10,6 +10,9 @@
 
 #define LV_MEM_CUSTOM 0
 #define LV_MEM_SIZE (48U * 1024U)
+/* LVGL's heap lives in PSRAM so internal RAM stays free for Wi-Fi and TLS. */
+#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
+#define LV_MEM_POOL_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 #define LV_TICK_CUSTOM 1
 #define LV_TICK_CUSTOM_INCLUDE <esp_timer.h>
