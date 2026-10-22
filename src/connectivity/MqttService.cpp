@@ -302,37 +302,93 @@ void MqttService::onMessage(char* topic, uint8_t* payload, unsigned int length)
 
 void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsigned int length)
 {
-    if (!topicMatches(_settings.telemetryTopic, topic) || length == 0 || length >= kMaxPayloadLength) {
+    if (topic == nullptr) {
+        Serial.println("[MQTT] Received message with null topic");
+        return;
+    }
+
+    Serial.printf("[MQTT] RX topic='%s' length=%u\n", topic, length);
+
+    if (!topicMatches(_settings.telemetryTopic, topic)) {
+        Serial.printf("[MQTT] Ignored: topic does not match configured filter '%s'\n",
+                      _settings.telemetryTopic.c_str());
+        return;
+    }
+
+    if (length == 0) {
+        Serial.println("[MQTT] Ignored: empty payload");
+        return;
+    }
+
+    if (payload == nullptr) {
+        Serial.println("[MQTT] Ignored: null payload");
+        return;
+    }
+
+    if (length >= kMaxPayloadLength) {
+        Serial.printf("[MQTT] Ignored: payload too large (%u bytes)\n", length);
         return;
     }
 
     char valueText[kMaxPayloadLength + 1];
     std::memcpy(valueText, payload, length);
     valueText[length] = '\0';
+
     JsonDocument document;
-    const DeserializationError jsonError = deserializeJson(document, valueText, length);
+    const DeserializationError jsonError =
+        deserializeJson(document, valueText, length);
+
     if (!jsonError && document.is<JsonObject>()) {
         JsonObject object = document.as<JsonObject>();
+        size_t accepted = 0;
+
         for (JsonPair item : object) {
             if (item.key().size() > 24) {
+                Serial.println("[MQTT] Skipped field: name exceeds 24 characters");
                 continue;
             }
-            if (!item.value().is<float>() && !item.value().is<int>() && !item.value().is<double>()) {
+
+            if (!item.value().is<float>() &&
+                !item.value().is<int>() &&
+                !item.value().is<double>()) {
+                Serial.printf("[MQTT] Skipped non-numeric field: %s\n",
+                              item.key().c_str());
                 continue;
             }
+
             const float value = item.value().as<float>();
+
             if (std::isfinite(value)) {
                 updateReading(item.key().c_str(), value);
+                Serial.printf("[MQTT] Accepted reading: %s=%.3f\n",
+                              item.key().c_str(), value);
+                ++accepted;
+            } else {
+                Serial.printf("[MQTT] Skipped non-finite field: %s\n",
+                              item.key().c_str());
             }
         }
+
+        Serial.printf("[MQTT] JSON object processed; accepted readings=%u\n",
+                      static_cast<unsigned>(accepted));
     } else {
         char* end = nullptr;
         const float value = std::strtof(valueText, &end);
+
         if (end != valueText && *end == '\0' && std::isfinite(value)) {
             updateReading(_settings.tileLabel.c_str(), value);
-        } else if (_lastNotificationAt == 0 || millis() - _lastNotificationAt > kAlertRepeatIntervalMs) {
-            notify("Invalid MQTT reading", "Use a numeric value or a JSON object of numeric readings.");
-            _lastNotificationAt = millis();
+            Serial.printf("[MQTT] Accepted numeric reading: %s=%.3f\n",
+                          _settings.tileLabel.c_str(), value);
+        } else {
+            Serial.println(
+                "[MQTT] Rejected payload: expected a number or JSON object");
+
+            if (_lastNotificationAt == 0 ||
+                millis() - _lastNotificationAt > kAlertRepeatIntervalMs) {
+                notify("Invalid MQTT reading",
+                       "Use a numeric value or a JSON object of numeric readings.");
+                _lastNotificationAt = millis();
+            }
         }
     }
 }
