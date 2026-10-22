@@ -18,11 +18,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <esp_partition.h>
+#include <esp_task_wdt.h>
+
+// Resolved at link time: null unless core dump to flash is compiled into the Arduino libraries.
+extern "C" esp_err_t esp_core_dump_image_check(void) __attribute__((weak));
 
 namespace {
 
-constexpr size_t kMaxUsbCommandLength = 512;
+constexpr size_t kMaxUsbCommandLength = 3072;   // fits a 2048-byte PEM plus JSON escapes
+constexpr uint32_t kTaskWdtTimeoutMs = 30000;     // TLS handshakes and timeouts can block for seconds
 constexpr char kBackendConfigPrefix[] = "CONFIGURE_BACKEND ";
+constexpr char kMqttConfigPrefix[] = "CONFIGURE_MQTT ";
 
 esp_panel::board::Board board;
 ConnectivityService connectivity;
@@ -112,6 +119,7 @@ void refreshBackendSnapshot(bool wifiConnected)
 // A single task also avoids a second large stack, which internal RAM cannot spare.
 void networkTask(void*)
 {
+    esp_task_wdt_add(nullptr);   // this task must keep looping or the watchdog panics
     static NetworkSnapshot local;
     uint32_t seenRevision = 0;
     uint32_t lastReportAt = 0;
@@ -146,8 +154,38 @@ void networkTask(void*)
                   resetReasonName());
         }
         networkHeartbeatAt = millis() | 1U;
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+}
+
+void configureTaskWatchdog()
+{
+    esp_task_wdt_config_t config = {};
+    config.timeout_ms = kTaskWdtTimeoutMs;
+    config.idle_core_mask = 1U;       // idle task of core 0 only, as the Arduino default
+    config.trigger_panic = true;      // panic prints a backtrace and records reset=TASK_WDT
+    if (esp_task_wdt_reconfigure(&config) != ESP_OK) {
+        esp_task_wdt_init(&config);
+    }
+}
+
+void reportCrashDiagnostics()
+{
+    const esp_partition_t* partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+    if (partition == nullptr) {
+        Serial.println("coredump: no partition in the partition table");
+        return;
+    }
+    if (esp_core_dump_image_check == nullptr) {
+        Serial.printf("coredump: %u KB partition present, but core dump to flash is not compiled in\n",
+            static_cast<unsigned>(partition->size / 1024));
+        return;
+    }
+    Serial.printf("coredump: %u KB partition, stored dump: %s\n",
+        static_cast<unsigned>(partition->size / 1024),
+        esp_core_dump_image_check() == ESP_OK ? "YES" : "none");
 }
 
 void haltWithError(const char* message)
@@ -156,6 +194,53 @@ void haltWithError(const char* message)
     while (true) {
         delay(1000);
     }
+}
+
+// Copies a string field into `target` when the JSON has it; absent keeps the saved value.
+bool takeUsbString(JsonDocument& document, const char* key, String& target)
+{
+    if (document[key].isNull()) {
+        return true;
+    }
+    if (!document[key].is<const char*>()) {
+        Serial.printf("ERROR: %s must be a string\n", key);
+        return false;
+    }
+    target = document[key].as<const char*>();
+    return true;
+}
+
+void configureMqttFromUsb(const char* json)
+{
+    JsonDocument document;
+    if (deserializeJson(document, json) || !document.is<JsonObject>()) {
+        Serial.println("ERROR: CONFIGURE_MQTT needs a JSON object");
+        return;
+    }
+    MqttSettings updated = settings.mqttSettings();
+    if (!takeUsbString(document, "host", updated.host) ||
+        !takeUsbString(document, "username", updated.username) ||
+        !takeUsbString(document, "password", updated.password) ||
+        !takeUsbString(document, "rootCa", updated.rootCa) ||
+        !takeUsbString(document, "telemetryTopic", updated.telemetryTopic) ||
+        !takeUsbString(document, "commandTopic", updated.commandTopic)) {
+        return;
+    }
+    if (!document["port"].isNull()) {
+        const int port = document["port"].as<int>();
+        if (!document["port"].is<int>() || port < 1 || port > 65535) {
+            Serial.println("ERROR: port must be a number from 1 to 65535");
+            return;
+        }
+        updated.port = static_cast<uint16_t>(port);
+    }
+    if (!settings.setMqttSettings(updated)) {
+        Serial.println("ERROR: Could not save MQTT settings (a field is too long; the root CA limit is 2048 bytes)");
+        return;
+    }
+    Serial.printf("USB MQTT settings saved: host=%s port=%u ca_bytes=%u\n",
+        updated.host.c_str(), static_cast<unsigned>(updated.port),
+        static_cast<unsigned>(updated.rootCa.length()));
 }
 
 void configureBackendFromUsb(const char* command)
@@ -175,8 +260,18 @@ void configureBackendFromUsb(const char* command)
         return;
     }
 
+    if (std::strncmp(command, kMqttConfigPrefix, sizeof(kMqttConfigPrefix) - 1) == 0) {
+        configureMqttFromUsb(command + sizeof(kMqttConfigPrefix) - 1);
+        return;
+    }
+
     if (std::strncmp(command, kBackendConfigPrefix, sizeof(kBackendConfigPrefix) - 1) != 0) {
-        Serial.println("ERROR: Unknown USB configuration command");
+        Serial.printf("ERROR: Unknown USB command (%u bytes, first bytes:",
+            static_cast<unsigned>(std::strlen(command)));
+        for (size_t index = 0; index < 8 && command[index] != '\0'; ++index) {
+            Serial.printf(" %02X", static_cast<unsigned>(static_cast<unsigned char>(command[index])));
+        }
+        Serial.println(")");
         return;
     }
 
@@ -216,6 +311,13 @@ void configureBackendFromUsb(const char* command)
     TerminalSettings updated = settings.terminalSettings();
     updated.backendUrl = backendUrl;
     updated.backendApiKey = apiKey;
+    if (!document["backendCa"].isNull()) {
+        if (!document["backendCa"].is<const char*>()) {
+            Serial.println("ERROR: backendCa must be a string");
+            return;
+        }
+        updated.backendRootCa = document["backendCa"].as<const char*>();
+    }
     if (timezone != nullptr) {
         updated.timezone = timezone;
     }
@@ -256,6 +358,7 @@ void updateUsbProvisioning()
 
 void setup()
 {
+    Serial.setRxBufferSize(kMaxUsbCommandLength);   // a PEM line must fit between loop() polls
     Serial.begin(115200);
     delay(100);
     Serial.println("Starting IoT Commander");
@@ -264,6 +367,8 @@ void setup()
         Serial.println("Previous restart was caused by a network task stall");
     }
     restartMarker = 0;
+    configureTaskWatchdog();
+    reportCrashDiagnostics();
 
     board.init();
     if (!board.begin()) {
@@ -299,10 +404,12 @@ void setup()
     snapshotLock = xSemaphoreCreateMutex();
     refreshBackendSnapshot(connectivity.wifiConnected());
     xTaskCreatePinnedToCore(networkTask, "network", 20480, nullptr, 1, nullptr, 0);
+    esp_task_wdt_add(nullptr);   // the UI loop task is watched too
 }
 
 void loop()
 {
+    esp_task_wdt_reset();
     updateUsbProvisioning();
     const uint32_t networkSeenAt = networkHeartbeatAt;
     if (networkSeenAt != 0 && static_cast<int32_t>(millis() - networkSeenAt) > static_cast<int32_t>(kNetworkStallLimitMs)) {
