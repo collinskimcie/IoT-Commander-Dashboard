@@ -52,3 +52,4 @@ node_modules/
 web-dashboard/dist/
 *.bak
 .env
+*.bak
