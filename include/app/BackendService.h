@@ -33,6 +33,10 @@ public:
     // The network task queues alerts; the main loop takes them (lock-free, one writer and one reader).
     bool takeAlert(String& message);
 
+    // Network task: applies a firmware update the dashboard asked for (see the OTA notes in BackendService.cpp).
+    // `tick` is called during the download so the watchdogs stay fed.
+    void serviceFirmware(const TerminalSettings& settings, bool wifiConnected, void (*tick)());
+
 private:
     struct ConnectionEvent {
         String type;
@@ -43,6 +47,8 @@ private:
     bool post(const TerminalSettings& settings, const String& path, const String& body);
     bool get(const TerminalSettings& settings, const String& path, String& response);
     void pollAlerts(const TerminalSettings& settings, bool wifiConnected);
+    bool installFirmware(const TerminalSettings& settings, uint32_t imageId, uint32_t size,
+                         const String& sha256, String& error, void (*tick)());
     bool validConfiguration(const TerminalSettings& settings);
     void noteResult(bool ok);
     uint32_t currentDelayMs() const;

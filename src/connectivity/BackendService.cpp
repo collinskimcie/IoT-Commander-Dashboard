@@ -7,6 +7,12 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <Preferences.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <mbedtls/sha256.h>
+#include <cstdlib>
 
 #include <algorithm>
 #include <atomic>
@@ -127,7 +133,7 @@ bool permanentlyRejected(int code)
 }
 
 #ifndef FW_VERSION
-#define FW_VERSION "0.4.0"
+#define FW_VERSION "0.5.1"
 #endif
 
 const char* resetReasonText()
@@ -624,4 +630,314 @@ bool BackendService::validConfiguration(const TerminalSettings& settings)
     }
     _configErrorLogged = false;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// OTA firmware update. The dashboard requests an image; the terminal pulls it.
+// Flow: poll offer -> download into the idle app slot -> verify SHA-256 -> activate -> restart.
+// verifyRollbackLater() in main.cpp keeps the new image "pending verify" until the backend answers,
+// otherwise the bootloader (or the 2-minute deadline below) rolls back to the previous slot.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint32_t kFirmwareFirstPollMs = 20000;
+constexpr uint32_t kFirmwarePollIntervalMs = 60000;
+constexpr uint32_t kReportRetryMs = 10000;
+constexpr uint32_t kVerifyDeadlineMs = 120000;   // a new image must reach the backend within this time
+constexpr size_t kOtaChunkBytes = 2048;
+
+bool gFirmwareBootChecked = false;
+bool gPendingVerify = false;
+uint32_t gFirmwarePolledAt = 0;
+uint32_t gReportAttemptAt = 0;
+uint8_t gReportKind = 0;          // 0 none, 1 update ok, 2 update failed
+uint32_t gReportImageId = 0;
+String gReportDetail;
+
+void saveReport(uint32_t imageId, uint8_t kind, const String& detail)
+{
+    gReportKind = kind;
+    gReportImageId = imageId;
+    gReportDetail = detail.substring(0, 100);
+    Preferences prefs;
+    if (prefs.begin("ota", false)) {
+        prefs.putUInt("rid", imageId);
+        prefs.putString("rmsg", gReportDetail);
+        prefs.putUChar("report", kind);
+        prefs.putUInt("tried", 0);
+        prefs.end();
+    }
+}
+
+void clearReport()
+{
+    gReportKind = 0;
+    Preferences prefs;
+    if (prefs.begin("ota", false)) {
+        prefs.putUChar("report", 0);
+        prefs.end();
+    }
+}
+
+void firmwareBootCheck()
+{
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    gPendingVerify = running != nullptr &&
+        esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY;
+
+    uint32_t tried = 0;
+    Preferences prefs;
+    if (prefs.begin("ota", false)) {
+        gReportKind = prefs.getUChar("report", 0);
+        gReportImageId = prefs.getUInt("rid", 0);
+        gReportDetail = prefs.getString("rmsg", "");
+        tried = prefs.getUInt("tried", 0);
+        prefs.end();
+    }
+    Serial.printf("OTA: running %s, pending verify: %s\n", FW_VERSION, gPendingVerify ? "yes" : "no");
+    if (!gPendingVerify && tried != 0 && gReportKind == 0) {
+        // An update was started, but this is not the new image: it was interrupted or rolled back.
+        saveReport(tried, 2, "update did not run; interrupted or rolled back");
+    }
+}
+
+String toHex(const uint8_t* data, size_t length)
+{
+    static const char digits[] = "0123456789abcdef";
+    String out;
+    out.reserve(length * 2);
+    for (size_t index = 0; index < length; ++index) {
+        out += digits[data[index] >> 4];
+        out += digits[data[index] & 0x0F];
+    }
+    return out;
+}
+
+} // namespace
+
+bool BackendService::installFirmware(
+    const TerminalSettings& settings,
+    uint32_t imageId,
+    uint32_t size,
+    const String& sha256,
+    String& error,
+    void (*tick)())
+{
+    const bool secure = settings.backendUrl.startsWith("https://");
+    if (secure && settings.backendRootCa.isEmpty()) {
+        error = "HTTPS needs a root CA";
+        return false;
+    }
+    const esp_partition_t* target = esp_ota_get_next_update_partition(nullptr);
+    if (target == nullptr || size > target->size) {
+        error = "image does not fit the idle app slot";
+        return false;
+    }
+    uint8_t* buffer = static_cast<uint8_t*>(malloc(kOtaChunkBytes));
+    if (buffer == nullptr) {
+        error = "out of memory";
+        return false;
+    }
+
+    bool begun = false;
+    mbedtls_sha256_context hash;
+    mbedtls_sha256_init(&hash);
+    mbedtls_sha256_starts(&hash, 0);
+
+    auto fail = [&](const String& reason) {
+        error = reason;
+        if (begun) {
+            Update.abort();
+        }
+        gHttp.end();
+        closeConnection();
+        mbedtls_sha256_free(&hash);
+        free(buffer);
+        buffer = nullptr;
+        return false;
+    };
+
+    closeConnection();   // a fresh connection, not the keep-alive one
+    gConnectionBase = settings.backendUrl;
+    WiFiClient& client = secure ? static_cast<WiFiClient&>(gSecure) : gPlain;
+    if (secure) {
+        gSecure.setCACert(settings.backendRootCa.c_str());
+        gSecure.setHandshakeTimeout(5);
+    }
+    client.setConnectionTimeout(5000);
+    gHttp.setReuse(false);
+    gHttp.setConnectTimeout(5000);
+    gHttp.setTimeout(15000);
+
+    const String url = apiPath(settings.backendUrl, "/api/v1/firmware/" + String(imageId) + "/download");
+    if (!gHttp.begin(client, url)) {
+        return fail("could not start the download");
+    }
+    gHttp.addHeader("X-Api-Key", settings.backendApiKey);
+    const int code = gHttp.GET();
+    if (code != HTTP_CODE_OK) {
+        return fail("download failed (HTTP " + String(code) + ")");
+    }
+    if (gHttp.getSize() != static_cast<int>(size)) {
+        return fail("download size differs from the offer");
+    }
+    if (!Update.begin(size, U_FLASH)) {
+        return fail(String("Update.begin: ") + Update.errorString());
+    }
+    begun = true;
+
+    WiFiClient* stream = gHttp.getStreamPtr();
+    uint32_t remaining = size;
+    uint32_t lastDataAt = millis();
+    uint32_t lastLogAt = lastDataAt;
+    while (remaining > 0) {
+        const size_t available = stream->available();
+        if (available == 0) {
+            if (millis() - lastDataAt > 15000) {
+                return fail("download stalled");
+            }
+            if (!stream->connected()) {
+                return fail("connection closed early");
+            }
+            if (tick != nullptr) {
+                tick();
+            }
+            delay(5);
+            continue;
+        }
+        const size_t want = std::min<size_t>(std::min<size_t>(available, kOtaChunkBytes), remaining);
+        const int got = stream->readBytes(buffer, want);
+        if (got <= 0) {
+            continue;
+        }
+        if (Update.write(buffer, static_cast<size_t>(got)) != static_cast<size_t>(got)) {
+            return fail(String("flash write: ") + Update.errorString());
+        }
+        mbedtls_sha256_update(&hash, buffer, static_cast<size_t>(got));
+        remaining -= static_cast<uint32_t>(got);
+        lastDataAt = millis();
+        if (tick != nullptr) {
+            tick();
+        }
+        if (millis() - lastLogAt > 5000) {
+            lastLogAt = millis();
+            Serial.printf("OTA: %u%%\n", static_cast<unsigned>((size - remaining) * 100ULL / size));
+        }
+    }
+
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&hash, digest);
+    mbedtls_sha256_free(&hash);
+    if (!toHex(digest, sizeof(digest)).equalsIgnoreCase(sha256)) {
+        return fail("SHA-256 does not match the offer");
+    }
+    gHttp.end();
+    closeConnection();
+    free(buffer);
+    buffer = nullptr;
+    // end(true) validates the image and only then makes the idle slot the boot slot.
+    if (!Update.end(true)) {
+        return fail(String("Update.end: ") + Update.errorString());
+    }
+    return true;
+}
+
+void BackendService::serviceFirmware(const TerminalSettings& settings, bool wifiConnected, void (*tick)())
+{
+    if (!gFirmwareBootChecked) {
+        gFirmwareBootChecked = true;
+        firmwareBootCheck();
+    }
+    const uint32_t now = millis();
+
+    if (gPendingVerify) {
+        if (backendStatus() == BackendStatus::Ok) {
+            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+                gPendingVerify = false;
+                Serial.println("OTA: new firmware confirmed; rollback cancelled");
+                uint32_t tried = 0;
+                Preferences prefs;
+                if (prefs.begin("ota", true)) {
+                    tried = prefs.getUInt("tried", 0);
+                    prefs.end();
+                }
+                if (tried != 0) {
+                    saveReport(tried, 1, String("running ") + FW_VERSION);
+                }
+            }
+        } else if (now > kVerifyDeadlineMs) {
+            Serial.println("OTA: new firmware could not reach the backend; rolling back");
+            Serial.flush();
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+        }
+        return;
+    }
+
+    if (!wifiConnected || _terminalId.isEmpty() || backendStatus() != BackendStatus::Ok) {
+        return;
+    }
+
+    if (gReportKind != 0) {
+        if (gReportAttemptAt != 0 && now - gReportAttemptAt < kReportRetryMs) {
+            return;
+        }
+        gReportAttemptAt = now;
+        JsonDocument document;
+        document["imageId"] = gReportImageId;
+        document["ok"] = gReportKind == 1;
+        document["detail"] = gReportDetail;
+        String body;
+        serializeJson(document, body);
+        const bool ok = post(settings, "/api/v1/terminals/" + _terminalId + "/firmware/result", body);
+        if (ok || permanentlyRejected(_lastHttpCode)) {
+            clearReport();
+        }
+        return;
+    }
+
+    if (gFirmwarePolledAt != 0 ? now - gFirmwarePolledAt < kFirmwarePollIntervalMs : now < kFirmwareFirstPollMs) {
+        return;
+    }
+    gFirmwarePolledAt = now;
+
+    String reply;
+    if (!get(settings, "/api/v1/terminals/" + _terminalId + "/firmware", reply)) {
+        return;
+    }
+    JsonDocument document;
+    if (deserializeJson(document, reply) || !(document["available"] | false)) {
+        return;
+    }
+    const uint32_t imageId = document["imageId"] | 0U;
+    const uint32_t size = document["size"] | 0U;
+    const String version = document["version"] | "";
+    const String sha256 = document["sha256"] | "";
+    if (imageId == 0 || size == 0 || sha256.length() != 64) {
+        return;
+    }
+    if (version == FW_VERSION) {
+        saveReport(imageId, 2, "already running " + version);
+        return;
+    }
+
+    Serial.printf("OTA: installing %s (%u bytes)\n", version.c_str(), static_cast<unsigned>(size));
+    {
+        Preferences prefs;
+        if (prefs.begin("ota", false)) {
+            prefs.putUInt("tried", imageId);
+            prefs.end();
+        }
+    }
+    String error;
+    if (!installFirmware(settings, imageId, size, sha256, error, tick)) {
+        Serial.printf("OTA: failed: %s\n", error.c_str());
+        saveReport(imageId, 2, error);
+        return;
+    }
+    Serial.println("OTA: image verified; restarting into it");
+    Serial.flush();
+    delay(200);
+    esp_restart();
 }

@@ -197,6 +197,147 @@ function Item({ label, value }) {
   );
 }
 
+function FirmwarePanel({ device, onChanged }) {
+  const deviceId = device?.id;
+  const online = statusOf(device) === 'online';
+  const [images, setImages] = useState([]);
+  const [offer, setOffer] = useState(null);
+  const [selected, setSelected] = useState('');
+  const [file, setFile] = useState(null);
+  const [inputKey, setInputKey] = useState(0);
+  const [version, setVersion] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+
+  async function call(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body && body.error) detail = body.error;
+      } catch {
+        // keep the status text
+      }
+      throw new Error(detail);
+    }
+    return response.status === 204 ? null : response.json();
+  }
+
+  async function refresh() {
+    try {
+      const [list, current] = await Promise.all([
+        call('/api/v1/firmware'),
+        call(`/api/v1/terminals/${encodeURIComponent(deviceId)}/firmware`)
+      ]);
+      setImages(Array.isArray(list) ? list : []);
+      setOffer(current && current.available ? current : null);
+    } catch {
+      // the panel keeps what it had if a refresh fails
+    }
+  }
+
+  useEffect(() => {
+    if (!deviceId) return undefined;
+    refresh();
+    const timer = window.setInterval(refresh, 10000);
+    return () => window.clearInterval(timer);
+  }, [deviceId]);
+
+  async function upload() {
+    if (!file || !version.trim()) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const created = await call(`/api/v1/firmware?version=${encodeURIComponent(version.trim())}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file
+      });
+      setMessage(`Uploaded ${created.version} (${Math.round(created.size / 1024)} KB)`);
+      setFile(null);
+      setVersion('');
+      setInputKey((key) => key + 1);
+      setSelected(String(created.id));
+      await refresh();
+    } catch (err) {
+      setMessage(`Upload failed: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function request(imageId) {
+    setBusy(true);
+    setMessage('');
+    try {
+      await call(`/api/v1/terminals/${encodeURIComponent(deviceId)}/firmware`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageId })
+      });
+      setMessage(imageId === null ? 'Update cancelled' : 'Requested. The terminal picks it up within about a minute.');
+      await refresh();
+      if (onChanged) onChanged();
+    } catch (err) {
+      setMessage(`Could not request: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startUpdate() {
+    const image = images.find((item) => String(item.id) === selected);
+    if (!image) return;
+    const ok = window.confirm(
+      `Update ${labelOf(device)} to ${image.version}?\n\nThe terminal downloads the image, restarts, and rolls back on its own if the new image cannot reach the backend within 2 minutes.`
+    );
+    if (ok) request(image.id);
+  }
+
+  return (
+    <div className="firmware-panel">
+      <div className="health-title">Firmware update</div>
+      <div className="firmware-row">
+        <span>Running</span>
+        <strong>{device.firmware || '—'}</strong>
+      </div>
+      {offer && (
+        <div className="firmware-row">
+          <span>Requested</span>
+          <strong>{offer.version}</strong>
+          <button type="button" disabled={busy} onClick={() => request(null)}>Cancel</button>
+        </div>
+      )}
+      <div className="firmware-row">
+        <select value={selected} onChange={(event) => setSelected(event.target.value)}>
+          <option value="">Choose an uploaded image…</option>
+          {images.map((image) => (
+            <option key={image.id} value={image.id}>
+              {image.version} · {Math.round(image.size / 1024)} KB · {new Date(image.uploadedAt).toLocaleString()}
+            </option>
+          ))}
+        </select>
+        <button type="button" disabled={busy || !selected || !online || Boolean(offer)} onClick={startUpdate}>
+          Request update
+        </button>
+      </div>
+      {!online && <small>The terminal must be online to start an update.</small>}
+      <div className="firmware-row">
+        <input key={inputKey} type="file" accept=".bin" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+        <input
+          value={version}
+          maxLength={24}
+          placeholder="Version, e.g. 0.5.1"
+          onChange={(event) => setVersion(event.target.value)}
+        />
+        <button type="button" disabled={busy || !file || !version.trim()} onClick={upload}>Upload</button>
+      </div>
+      {message && <small>{message}</small>}
+    </div>
+  );
+}
+
 export function HealthPanel({ device, onChanged }) {
   const [history, setHistory] = useState([]);
   const [name, setName] = useState('');
@@ -327,6 +468,8 @@ export function HealthPanel({ device, onChanged }) {
           </ResponsiveContainer>
         )}
       </div>
+
+      <FirmwarePanel device={device} onChanged={onChanged} />
 
       <form className="health-form" onSubmit={save}>
         <label>

@@ -34,3 +34,9 @@
 .health-form input { padding: 7px 9px; border: 1px solid #e3e9ef; border-radius: 8px; font: inherit; }
 .health-form button { padding: 8px 14px; border: 0; border-radius: 8px; background: #12a980; color: #fff; font: inherit; cursor: pointer; }
 .health-form button:disabled { opacity: .6; cursor: default; }
+
+/* firmware update panel */
+.firmware-panel { display: grid; gap: 8px; margin: 12px 0; }
+.firmware-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.firmware-row > span { color: #8491a2; font-size: 12px; min-width: 70px; }
+.firmware-row select, .firmware-row input[type="text"], .firmware-row input:not([type]) { min-width: 0; flex: 1 1 160px; }

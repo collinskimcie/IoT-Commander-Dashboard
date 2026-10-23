@@ -3,6 +3,7 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -11,8 +12,13 @@
 namespace {
 
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kWifiScanTimeoutMs = 20000;
+uint32_t gWifiScanStartedAt = 0;
 constexpr uint8_t kMaxBleDevices = 12;
 constexpr uint32_t kBleScanSeconds = 6;
+// BLE starts on demand and is released after each scan so its RAM goes back to TLS.
+// If a second scan ever crashes, set this to false: BLE then stays up after the first scan.
+constexpr bool kReleaseBleAfterScan = true;
 
 bool containsDevice(const std::vector<NearbyDevice>& devices, Transport transport, const String& id)
 {
@@ -28,7 +34,6 @@ void ConnectivityService::begin()
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
-    BLEDevice::init("IoT Commander");
 }
 
 void ConnectivityService::update()
@@ -50,8 +55,16 @@ void ConnectivityService::update()
         }
     }
 
-    if (_wifiScanning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
-        finishWifiScan();
+    if (_wifiScanning) {
+        if (WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
+            finishWifiScan();
+        } else if (millis() - gWifiScanStartedAt > kWifiScanTimeoutMs) {
+            Serial.println("[WiFi] Scan timed out");
+            esp_wifi_scan_stop();
+            WiFi.scanDelete();
+            _wifiScanning = false;
+            _statusMessage = "Wi-Fi scan timed out";
+        }
     }
 
     if (_bluetoothScanFinished) {
@@ -105,33 +118,25 @@ bool ConnectivityService::startWifiScan()
     _nextWifiRetryAt = millis() + 30000UL;
     _wifiConnecting = false;
 
-    // Reset the Wi-Fi radio before scanning.
-    WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
-    delay(300);
-    WiFi.mode(WIFI_STA);
-    delay(300);
+    // Keep the radio up so MQTT and the backend stay connected during the scan.
+    // Only a half-finished connect attempt is stopped, since it cannot run alongside a scan.
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.disconnect(false, false);
+    }
     WiFi.scanDelete();
 
-    Serial.printf("[WiFi] Starting synchronous scan; status=%d\n",
-                  static_cast<int>(WiFi.status()));
-
-    // Temporary diagnostic: wait for the scan to finish.
-    const int result = WiFi.scanNetworks(false, true);
-
-    Serial.printf("[WiFi] Synchronous scan result=%d, status=%d\n",
-                  result, static_cast<int>(WiFi.status()));
-
-    if (result < 0) {
+    // Asynchronous: returns immediately and update() collects the result.
+    const int result = WiFi.scanNetworks(true, true);
+    if (result == WIFI_SCAN_FAILED) {
         _statusMessage = "Wi-Fi scan failed";
-        Serial.println("[WiFi] Synchronous scan failed");
+        Serial.printf("[WiFi] Scan start failed; status=%d\n", static_cast<int>(WiFi.status()));
         return false;
     }
 
     _wifiScanning = true;
-    finishWifiScan();
-
-    Serial.printf("[WiFi] Discovery complete; networks found=%d\n", result);
+    gWifiScanStartedAt = millis();
+    _statusMessage = "Scanning for Wi-Fi networks";
+    Serial.println("[WiFi] Async scan started");
     return true;
 }
 
@@ -146,6 +151,14 @@ bool ConnectivityService::startBluetoothScan()
     _bluetoothScanFinished = false;
     _bluetoothScanning = true;
     _statusMessage = "Scanning for Bluetooth devices";
+    if (!BLEDevice::getInitialized()) {
+        const uint32_t heapBefore = ESP.getFreeHeap();
+        BLEDevice::init("IoT Commander");
+        log_i("BLE started: heap free %u -> %u (maxblock %u)",
+              static_cast<unsigned>(heapBefore),
+              static_cast<unsigned>(ESP.getFreeHeap()),
+              static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    }
     const BaseType_t created = xTaskCreatePinnedToCore(
         bluetoothScanTask, "ble_scan", 4096, this, 1, nullptr, 0);
     if (created != pdPASS) {
@@ -295,6 +308,14 @@ void ConnectivityService::finishBluetoothScan()
 void ConnectivityService::bluetoothScanTask(void* parameter)
 {
     auto* service = static_cast<ConnectivityService*>(parameter);
+    if (!BLEDevice::getInitialized()) {
+        // BLE failed to start (most likely out of memory): finish with no results.
+        portENTER_CRITICAL(&service->_bleMux);
+        service->_bleResultCount = 0;
+        service->_bluetoothScanFinished = true;
+        portEXIT_CRITICAL(&service->_bleMux);
+        vTaskDelete(nullptr);
+    }
     BLEScan* scanner = BLEDevice::getScan();
     scanner->setActiveScan(true);
     scanner->setInterval(100);
@@ -314,13 +335,21 @@ void ConnectivityService::bluetoothScanTask(void* parameter)
         result.rssi = device.getRSSI();
     }
 
+    if (results != nullptr) {
+        scanner->clearResults();
+    }
+    if (kReleaseBleAfterScan) {
+        BLEDevice::deinit(false);
+        log_i("BLE released: heap free=%u maxblock=%u",
+              static_cast<unsigned>(ESP.getFreeHeap()),
+              static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    }
+
+    // Publish the results only after BLE is released, so a new scan cannot start mid-teardown.
     portENTER_CRITICAL(&service->_bleMux);
     std::memcpy(service->_bleResults, discovered, sizeof(BleResult) * discoveredCount);
     service->_bleResultCount = discoveredCount;
     service->_bluetoothScanFinished = true;
     portEXIT_CRITICAL(&service->_bleMux);
-    if (results != nullptr) {
-        scanner->clearResults();
-    }
     vTaskDelete(nullptr);
 }

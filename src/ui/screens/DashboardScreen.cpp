@@ -121,6 +121,27 @@ void onDiscover(lv_event_t* event)
     }
 }
 
+// Long press on a card jumps to a page. LVGL cancels the press if the finger starts scrolling.
+void onCardLongPress(lv_event_t* event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_LONG_PRESSED || screenContext == nullptr) {
+        return;
+    }
+    const AppPage page = static_cast<AppPage>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    lv_indev_wait_release(lv_indev_get_act());   // the release must not land on the next page
+    screenContext->navigate(screenContext->owner, page);
+}
+
+void addLongPressShortcut(lv_obj_t* card, AppPage page)
+{
+    if (card == nullptr) {
+        return;
+    }
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, onCardLongPress, LV_EVENT_LONG_PRESSED,
+                        reinterpret_cast<void*>(static_cast<uintptr_t>(page)));
+}
+
 void renderSavedDevices()
 {
     lv_obj_clean(savedList);
@@ -176,11 +197,13 @@ lv_obj_t* createDashboard(lv_obj_t* parent, ScreenContext& context)
 
     lv_obj_t* clock = uiCreateCard(page);
     styleDashboardCard(clock, dark);
+    addLongPressShortcut(clock, AppPage::Settings);
     uiCreateLabel(clock, "LOCAL TIME", 12);
     timeLabel = uiCreateLabel(clock, context.time.localTime().c_str(), 20);
 
     lv_obj_t* connection = uiCreateCard(page);
     styleDashboardCard(connection, dark);
+    addLongPressShortcut(connection, AppPage::Devices);
     uiCreateLabel(connection, "NETWORK", 12);
     connectionLabel = uiCreateLabel(connection, "Offline", 20);
 
@@ -191,6 +214,7 @@ lv_obj_t* createDashboard(lv_obj_t* parent, ScreenContext& context)
 
     lv_obj_t* mqtt = uiCreateCard(page);
     styleDashboardCard(mqtt, dark);
+    addLongPressShortcut(mqtt, AppPage::Settings);
     uiCreateLabel(mqtt, "MQTT BROKER", 12);
     mqttStatusLabel = uiCreateLabel(mqtt, context.mqtt.status().c_str(), 12);
     lv_label_set_long_mode(mqttStatusLabel, LV_LABEL_LONG_DOT);

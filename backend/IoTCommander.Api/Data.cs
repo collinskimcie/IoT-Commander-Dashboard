@@ -10,6 +10,7 @@ public sealed class CommanderDbContext(DbContextOptions<CommanderDbContext> opti
     public DbSet<HeartbeatRecord> HeartbeatRecords => Set<HeartbeatRecord>();
     public DbSet<AlertRuleRecord> AlertRules => Set<AlertRuleRecord>();
     public DbSet<AlertEventRecord> AlertEvents => Set<AlertEventRecord>();
+    public DbSet<FirmwareImageRecord> FirmwareImages => Set<FirmwareImageRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -68,6 +69,7 @@ public sealed class TerminalRecord
     public DateTimeOffset? LastBootAt { get; set; }
     public int BootCount { get; set; }
     public string? LatestReadings { get; set; }
+    public long? UpdateImageId { get; set; }
 }
 
 public sealed class ConnectionEventRecord

@@ -25,6 +25,11 @@
 // Resolved at link time: null unless core dump to flash is compiled into the Arduino libraries.
 extern "C" esp_err_t esp_core_dump_image_check(void) __attribute__((weak));
 
+// Overrides the Arduino core default (which returns false and marks every image valid at startup).
+// With true, a freshly updated image stays "pending verify" until BackendService confirms it,
+// and the bootloader rolls back to the previous slot if it resets first. Needs C linkage.
+extern "C" bool verifyRollbackLater() { return true; }
+
 namespace {
 
 constexpr size_t kMaxUsbCommandLength = 3072;   // fits a 2048-byte PEM plus JSON escapes
@@ -116,6 +121,13 @@ void refreshBackendSnapshot(bool wifiConnected)
           static_cast<unsigned>(settingsRevision), wifiConnected ? "up" : "down");
 }
 
+// Called during a firmware download so a long transfer neither trips the watchdog nor the stall restart.
+void otaTick()
+{
+    networkHeartbeatAt = millis() | 1U;
+    esp_task_wdt_reset();
+}
+
 // One task owns all blocking network work (MQTT + backend), so LVGL never waits on it.
 // A single task also avoids a second large stack, which internal RAM cannot spare.
 void networkTask(void*)
@@ -139,6 +151,7 @@ void networkTask(void*)
             mqtt.readingsUnsafe(),
             local.mqtt.unit,
             mqtt.readingRevision());
+        backend.serviceFirmware(local.terminal, local.wifiConnected, otaTick);
 
         if (millis() - lastReportAt >= 30000) {
             lastReportAt = millis();
