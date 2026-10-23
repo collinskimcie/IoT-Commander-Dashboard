@@ -53,3 +53,4 @@ web-dashboard/dist/
 *.bak
 .env
 *.bak
+build/
