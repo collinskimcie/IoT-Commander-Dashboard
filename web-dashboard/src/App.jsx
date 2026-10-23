@@ -9,8 +9,11 @@ import {
   YAxis
 } from 'recharts';
 import { FleetOverview, HealthPanel } from './Fleet';
+import AlertsPanel from './Alerts';
 
 const REFRESH_MS = 15000;
+const isTabVisible = () =>
+  typeof document === 'undefined' || document.visibilityState !== 'hidden';
 const RANGES = [
   { label: '1 hour', value: '1h', ms: 60 * 60 * 1000 },
   { label: '24 hours', value: '24h', ms: 24 * 60 * 60 * 1000 },
@@ -32,6 +35,44 @@ async function api(path, signal) {
   }
 
   return response.json();
+}
+
+function Sparkline({ values }) {
+  if (!Array.isArray(values) || values.length < 2) return null;
+  const width = 120;
+  const height = 24;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const flat = max === min;
+  const step = width / (values.length - 1);
+  const path = values
+    .map((value, index) => {
+      const x = (index * step).toFixed(1);
+      const y = flat
+        ? height / 2
+        : (height - 2 - ((value - min) / (max - min)) * (height - 4)).toFixed(1);
+      return `${index === 0 ? 'M' : 'L'}${x} ${y}`;
+    })
+    .join(' ');
+  return (
+    <svg
+      className="sparkline"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label="Last hour trend"
+    >
+      <path
+        d={path}
+        fill="none"
+        stroke="#12a980"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
 }
 
 function deviceStatus(device) {
@@ -138,6 +179,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const [sparklines, setSparklines] = useState({});
 
   const selectedDevice = devices.find((device) => device.id === selectedId);
   const selectedRange = RANGES.find((item) => item.value === range) || RANGES[1];
@@ -153,6 +195,12 @@ export default function App() {
       }
 
       setDevices(deviceList);
+      // Optional extra: an older backend without this route simply shows no sparklines.
+      api('/api/v1/terminals/sparklines?minutes=60&points=30', signal)
+        .then((data) => {
+          if (data && typeof data === 'object' && !Array.isArray(data)) setSparklines(data);
+        })
+        .catch(() => {});
       setSelectedId((current) => {
         if (current && deviceList.some((device) => device.id === current)) {
           return current;
@@ -177,14 +225,18 @@ export default function App() {
     const controller = new AbortController();
     loadData(controller.signal, true);
 
-    const interval = window.setInterval(() => {
+    const refreshNow = () => {
+      if (!isTabVisible()) return;
       loadData(undefined, false);
       setNow(Date.now());
-    }, REFRESH_MS);
+    };
+    const interval = window.setInterval(refreshNow, REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshNow);
 
     return () => {
       controller.abort();
       window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshNow);
     };
   }, [loadData]);
 
@@ -288,11 +340,16 @@ export default function App() {
 
     loadSelectedDevice();
 
-    const interval = window.setInterval(loadSelectedDevice, REFRESH_MS);
+    const refreshSelected = () => {
+      if (isTabVisible()) loadSelectedDevice();
+    };
+    const interval = window.setInterval(refreshSelected, REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshSelected);
     return () => {
       active = false;
       controller.abort();
       window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshSelected);
     };
   }, [selectedId, selectedRange.ms]);
 
@@ -451,6 +508,7 @@ export default function App() {
                       <span className="device-info">
                         <strong>{device.name || device.id}</strong>
                         <small>Last seen {ageLabel(device)}</small>
+                        <Sparkline values={Object.values(sparklines[device.id] || {})[0]} />
                       </span>
                       <StatusPill status={status} />
                       <span className="row-chevron">›</span>
@@ -488,6 +546,8 @@ export default function App() {
             )}
           </article>
         </section>
+
+        <AlertsPanel devices={devices} />
 
         <section className="panel telemetry-panel" id="telemetry">
           <div className="panel-heading telemetry-heading">

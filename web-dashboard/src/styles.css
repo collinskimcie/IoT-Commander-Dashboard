@@ -280,3 +280,10 @@ tbody tr:last-child td { border-bottom: 0; }
   .telemetry-chart-grid { grid-template-columns: minmax(0, 1fr); }
   .telemetry-chart-card .chart-wrap { height: 225px; }
 }
+
+.sparkline {
+  display: block;
+  width: 120px;
+  height: 24px;
+  margin-top: 4px;
+}
