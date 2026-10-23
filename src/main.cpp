@@ -11,6 +11,7 @@
 #include "app/TimeService.h"
 #include "app/SlowGuard.h"
 #include "platform/LvglPort.h"
+#include "platform/ScreenPower.h"
 #include "ui/UiManager.h"
 
 #include <cstring>
@@ -375,6 +376,7 @@ void setup()
         haltWithError("Viewe display board initialization failed");
     }
 
+    screenPowerBegin(board.getBacklight());
     if (!lvglPortBegin(board.getLCD(), board.getTouch())) {
         haltWithError("LVGL display or touch initialization failed");
     }
@@ -411,6 +413,7 @@ void loop()
 {
     esp_task_wdt_reset();
     updateUsbProvisioning();
+    screenPowerUpdate();
     const uint32_t networkSeenAt = networkHeartbeatAt;
     if (networkSeenAt != 0 && static_cast<int32_t>(millis() - networkSeenAt) > static_cast<int32_t>(kNetworkStallLimitMs)) {
         Serial.printf("FATAL: network task stalled for %lu s; restarting\n",
