@@ -409,11 +409,24 @@ void setup()
     esp_task_wdt_add(nullptr);   // the UI loop task is watched too
 }
 
+// Alerts raised by the backend arrive via the network task; show them from the main loop.
+void deliverBackendAlerts()
+{
+    String message;
+    uint8_t delivered = 0;
+    while (delivered < 3 && backend.takeAlert(message)) {
+        notifications.push("Backend alert", message);
+        screenPowerWake();
+        ++delivered;
+    }
+}
+
 void loop()
 {
     esp_task_wdt_reset();
     updateUsbProvisioning();
     screenPowerUpdate();
+    deliverBackendAlerts();
     const uint32_t networkSeenAt = networkHeartbeatAt;
     if (networkSeenAt != 0 && static_cast<int32_t>(millis() - networkSeenAt) > static_cast<int32_t>(kNetworkStallLimitMs)) {
         Serial.printf("FATAL: network task stalled for %lu s; restarting\n",

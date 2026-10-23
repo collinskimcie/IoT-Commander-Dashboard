@@ -127,7 +127,7 @@ bool permanentlyRejected(int code)
 }
 
 #ifndef FW_VERSION
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.4.0"
 #endif
 
 const char* resetReasonText()
@@ -358,6 +358,8 @@ void BackendService::update(
         return;
     }
 
+    pollAlerts(settings, wifiConnected);
+
     // Drain stored readings oldest first; remove them only once the backend has them.
     if (gQueueCount == 0) {
         return;
@@ -390,6 +392,151 @@ void BackendService::update(
         if (ok && gQueueCount > 0) {
             Serial.printf("Backend: %u stored readings left to send\n", static_cast<unsigned>(gQueueCount));
         }
+    }
+}
+
+namespace {
+
+constexpr uint32_t kAlertPollIntervalMs = 15000;
+constexpr size_t kAlertSlots = 8;          // alerts waiting for the main loop
+constexpr size_t kAlertTextLength = 161;
+char gAlertText[kAlertSlots][kAlertTextLength];
+volatile uint8_t gAlertHead = 0;           // next slot the main loop reads
+volatile uint8_t gAlertTail = 0;           // next slot the network task writes
+
+void pushAlertText(const char* text)
+{
+    const uint8_t tail = gAlertTail;
+    const uint8_t next = static_cast<uint8_t>((tail + 1) % kAlertSlots);
+    if (next == gAlertHead) {
+        Serial.println("WARNING: alert queue full; dropping an alert");
+        return;
+    }
+    std::snprintf(gAlertText[tail], kAlertTextLength, "%s", text);
+    __sync_synchronize();
+    gAlertTail = next;
+}
+
+} // namespace
+
+bool BackendService::takeAlert(String& message)
+{
+    const uint8_t head = gAlertHead;
+    if (head == gAlertTail) {
+        return false;
+    }
+    __sync_synchronize();
+    message = gAlertText[head];
+    __sync_synchronize();
+    gAlertHead = static_cast<uint8_t>((head + 1) % kAlertSlots);
+    return true;
+}
+
+bool BackendService::get(const TerminalSettings& settings, const String& path, String& response)
+{
+    const String url = apiPath(settings.backendUrl, path);
+    const bool secure = settings.backendUrl.startsWith("https://");
+    _lastHttpCode = 0;
+    response = "";
+
+    if (secure && settings.backendRootCa.isEmpty()) {
+        return false;
+    }
+
+    // A different backend cannot reuse the open connection.
+    if (settings.backendUrl != gConnectionBase) {
+        closeConnection();
+        gConnectionBase = settings.backendUrl;
+    }
+
+    auto attempt = [&](WiFiClient& client) -> int {
+        if (secure) {
+            gSecure.setCACert(settings.backendRootCa.c_str());
+            gSecure.setHandshakeTimeout(3);
+        }
+        client.setConnectionTimeout(1500);
+        gHttp.setReuse(kReuseConnection);
+        gHttp.setConnectTimeout(2500);
+        gHttp.setTimeout(3000);
+        if (!gHttp.begin(client, url)) {
+            return HTTPC_ERROR_CONNECTION_REFUSED;
+        }
+        gHttp.addHeader("X-Api-Key", settings.backendApiKey);
+        const int code = gHttp.GET();
+        if (code > 0) {
+            response = gHttp.getString();
+        }
+        gHttp.end();
+        return code;
+    };
+
+    const bool wasOpen = secure ? gSecure.connected() : gPlain.connected();
+    int responseCode = secure ? attempt(gSecure) : attempt(gPlain);
+    if (responseCode < 0 && wasOpen) {
+        closeConnection();
+        responseCode = secure ? attempt(gSecure) : attempt(gPlain);
+    }
+    if (responseCode < 0 || !kReuseConnection) {
+        closeConnection();
+    }
+
+    _lastHttpCode = responseCode;
+    if (responseCode < 200 || responseCode >= 300) {
+        Serial.printf("WARNING: Alert poll failed (HTTP %d)\n", responseCode);
+        return false;
+    }
+    return true;
+}
+
+void BackendService::pollAlerts(const TerminalSettings& settings, bool wifiConnected)
+{
+    if (!wifiConnected || _consecutiveFailures > 0 || _terminalId.isEmpty() || settings.backendUrl.isEmpty()) {
+        return;
+    }
+    const uint32_t nowMs = millis();
+    if (_alertsPolledOnce && nowMs - _lastAlertPollAt < kAlertPollIntervalMs) {
+        return;
+    }
+    _alertsPolledOnce = true;
+    _lastAlertPollAt = nowMs;
+
+    String path = "/api/v1/terminals/" + _terminalId + "/alerts";
+    if (_alertsBootstrapped) {
+        path += "?afterId=" + String(_lastAlertId) + "&limit=5";
+    }
+
+    String reply;
+    if (!get(settings, path, reply)) {
+        return;
+    }
+
+    JsonDocument document;
+    if (deserializeJson(document, reply)) {
+        Serial.println("WARNING: Alert poll returned invalid JSON");
+        return;
+    }
+
+    const uint32_t latestId = document["latestId"] | 0U;
+    if (!_alertsBootstrapped || latestId < _lastAlertId) {
+        // First poll after boot (or the backend counter restarted): start from now, never replay history.
+        _lastAlertId = latestId;
+        _alertsBootstrapped = true;
+        Serial.printf("Backend alerts: following from id %lu\n", static_cast<unsigned long>(latestId));
+        return;
+    }
+
+    for (JsonObject alert : document["alerts"].as<JsonArray>()) {
+        const uint32_t id = alert["id"] | 0U;
+        const char* message = alert["message"] | "";
+        if (id <= _lastAlertId) {
+            continue;
+        }
+        _lastAlertId = id;
+        if (message[0] == '\0') {
+            continue;
+        }
+        Serial.printf("Backend alert %lu: %s\n", static_cast<unsigned long>(id), message);
+        pushAlertText(message);
     }
 }
 

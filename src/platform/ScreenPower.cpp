@@ -28,6 +28,11 @@ void screenPowerBegin(esp_panel::drivers::Backlight* backlight)
     }
 }
 
+void screenPowerWake()
+{
+    lv_disp_trig_activity(nullptr);
+}
+
 void screenPowerUpdate()
 {
     if (backlightControl == nullptr) {

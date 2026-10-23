@@ -30,6 +30,9 @@ public:
         const String& unit,
         uint32_t readingRevision);
 
+    // The network task queues alerts; the main loop takes them (lock-free, one writer and one reader).
+    bool takeAlert(String& message);
+
 private:
     struct ConnectionEvent {
         String type;
@@ -38,6 +41,8 @@ private:
     };
 
     bool post(const TerminalSettings& settings, const String& path, const String& body);
+    bool get(const TerminalSettings& settings, const String& path, String& response);
+    void pollAlerts(const TerminalSettings& settings, bool wifiConnected);
     bool validConfiguration(const TerminalSettings& settings);
     void noteResult(bool ok);
     uint32_t currentDelayMs() const;
@@ -59,4 +64,8 @@ private:
     bool _hasSentReading = false;
     bool _hasSentHeartbeat = false;
     bool _hasSentTelemetrySnapshot = false;
+    uint32_t _lastAlertPollAt = 0;
+    uint32_t _lastAlertId = 0;
+    bool _alertsPolledOnce = false;
+    bool _alertsBootstrapped = false;
 };
