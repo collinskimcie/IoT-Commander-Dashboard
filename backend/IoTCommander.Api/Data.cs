@@ -8,6 +8,8 @@ public sealed class CommanderDbContext(DbContextOptions<CommanderDbContext> opti
     public DbSet<ConnectionEventRecord> ConnectionEvents => Set<ConnectionEventRecord>();
     public DbSet<TelemetryRecord> TelemetryRecords => Set<TelemetryRecord>();
     public DbSet<HeartbeatRecord> HeartbeatRecords => Set<HeartbeatRecord>();
+    public DbSet<AlertRuleRecord> AlertRules => Set<AlertRuleRecord>();
+    public DbSet<AlertEventRecord> AlertEvents => Set<AlertEventRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
