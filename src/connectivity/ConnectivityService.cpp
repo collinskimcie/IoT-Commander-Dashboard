@@ -4,6 +4,7 @@
 #include <BLEScan.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <Preferences.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,11 @@ namespace {
 
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiScanTimeoutMs = 20000;
+constexpr size_t kMaxKnownNetworks = 5;
+// Set to true to let the board join OPEN (password-less) networks when no known network is in range.
+// Open networks are unauthenticated and often sit behind a login page, so this stays off by default.
+constexpr bool kAllowOpenNetworks = false;
+constexpr int kMinOpenRssi = -75;
 uint32_t gWifiScanStartedAt = 0;
 constexpr uint8_t kMaxBleDevices = 12;
 constexpr uint32_t kBleScanSeconds = 6;
@@ -34,6 +40,7 @@ void ConnectivityService::begin()
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
+    loadKnownNetworks();
 }
 
 void ConnectivityService::update()
@@ -44,6 +51,11 @@ void ConnectivityService::update()
         _previousWifiConnected = connected;
 
         if (connected) {
+            _failCount = 0;
+            _lastFailedSsid = "";
+            if (WiFi.SSID() == _lastSsid) {
+                rememberNetwork(_lastSsid, _lastPassword);
+            }
             Serial.printf(
                 "[WiFi] Connected: SSID=%s, IP=%s, gateway=%s, RSSI=%d dBm\n",
                 WiFi.SSID().c_str(),
@@ -71,7 +83,13 @@ void ConnectivityService::update()
         finishBluetoothScan();
     }
 
-    if (_wifiConnecting) {
+    if (_autoScanning) {
+        if (connected) {
+            cancelAutoScan();
+        } else {
+            serviceAutoScan();
+        }
+    } else if (_wifiConnecting) {
         if (connected) {
             _wifiConnecting = false;
             _nextWifiRetryAt = millis() + 10000UL;
@@ -86,11 +104,22 @@ void ConnectivityService::update()
             WiFi.disconnect(false, false);
             _wifiConnecting = false;
             _nextWifiRetryAt = millis() + 5000UL;
+            if (_failCount < 100) {
+                ++_failCount;
+            }
+            _lastFailedSsid = _lastSsid;
             _statusMessage = "Wi-Fi connection timed out (status " +
                 String(wifiStatus) + "); retry scheduled";
         }
     } else if (connected && !_wifiScanning) {
         _statusMessage = "Connected to " + WiFi.SSID();
+    } else if (!connected &&
+               !_wifiScanning &&
+               !_bluetoothScanning &&
+               _failCount >= 1 &&
+               !_known.empty() &&
+               static_cast<int32_t>(millis() - _nextWifiRetryAt) >= 0) {
+        startAutoScan();
     } else if (!connected &&
                !_lastSsid.isEmpty() &&
                !_wifiScanning &&
@@ -107,8 +136,178 @@ void ConnectivityService::update()
     }
 }
 
+void ConnectivityService::loadKnownNetworks()
+{
+    _known.clear();
+    Preferences prefs;
+    if (!prefs.begin("wifinets", true)) {
+        return;
+    }
+    const uint8_t count = prefs.getUChar("n", 0);
+    for (uint8_t i = 0; i < count && i < kMaxKnownNetworks; ++i) {
+        char ks[4];
+        char kp[4];
+        snprintf(ks, sizeof(ks), "s%u", static_cast<unsigned>(i));
+        snprintf(kp, sizeof(kp), "p%u", static_cast<unsigned>(i));
+        KnownNetwork net;
+        net.ssid = prefs.getString(ks, "");
+        net.password = prefs.getString(kp, "");
+        if (!net.ssid.isEmpty()) {
+            _known.push_back(net);
+        }
+    }
+    prefs.end();
+    Serial.printf("[WiFi] %u known network(s) loaded\n", static_cast<unsigned>(_known.size()));
+}
+
+void ConnectivityService::saveKnownNetworks()
+{
+    Preferences prefs;
+    if (!prefs.begin("wifinets", false)) {
+        return;
+    }
+    prefs.putUChar("n", static_cast<uint8_t>(_known.size()));
+    for (size_t i = 0; i < _known.size(); ++i) {
+        char ks[4];
+        char kp[4];
+        snprintf(ks, sizeof(ks), "s%u", static_cast<unsigned>(i));
+        snprintf(kp, sizeof(kp), "p%u", static_cast<unsigned>(i));
+        prefs.putString(ks, _known[i].ssid);
+        prefs.putString(kp, _known[i].password);
+    }
+    prefs.end();
+}
+
+void ConnectivityService::rememberNetwork(const String& ssid, const String& password)
+{
+    // Open networks are never saved.
+    if (ssid.isEmpty() || password.isEmpty()) {
+        return;
+    }
+    for (size_t i = 0; i < _known.size(); ++i) {
+        if (_known[i].ssid == ssid) {
+            if (_known[i].password == password) {
+                return;
+            }
+            _known[i].password = password;
+            saveKnownNetworks();
+            return;
+        }
+    }
+    KnownNetwork net;
+    net.ssid = ssid;
+    net.password = password;
+    _known.insert(_known.begin(), net);
+    if (_known.size() > kMaxKnownNetworks) {
+        _known.resize(kMaxKnownNetworks);
+    }
+    saveKnownNetworks();
+    Serial.printf("[WiFi] Remembered network: %s\n", ssid.c_str());
+}
+
+void ConnectivityService::cancelAutoScan()
+{
+    if (!_autoScanning) {
+        return;
+    }
+    esp_wifi_scan_stop();
+    WiFi.scanDelete();
+    _autoScanning = false;
+}
+
+void ConnectivityService::startAutoScan()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect(false, false);
+        delay(300);
+    }
+    WiFi.scanDelete();
+    if (WiFi.scanNetworks(true, true) == WIFI_SCAN_FAILED) {
+        _nextWifiRetryAt = millis() + 10000UL;
+        return;
+    }
+    _autoScanning = true;
+    _autoScanStartedAt = millis();
+    _statusMessage = "Looking for a known Wi-Fi network";
+    Serial.println("[WiFi] Auto scan started");
+}
+
+void ConnectivityService::serviceAutoScan()
+{
+    const int count = WiFi.scanComplete();
+    if (count == WIFI_SCAN_RUNNING) {
+        if (millis() - _autoScanStartedAt > kWifiScanTimeoutMs) {
+            cancelAutoScan();
+            _nextWifiRetryAt = millis() + 10000UL;
+        }
+        return;
+    }
+    _autoScanning = false;
+
+    // The network that just failed is penalised so another candidate gets a turn.
+    int bestKnownScore = -10000;
+    int bestOpenScore = -10000;
+    String knownSsid, knownPassword, openSsid;
+    for (int i = 0; i < count; ++i) {
+        const String ssid = WiFi.SSID(i);
+        if (ssid.isEmpty()) {
+            continue;
+        }
+        const int rssi = WiFi.RSSI(i);
+        const int score = rssi - (ssid == _lastFailedSsid ? 100 : 0);
+        bool known = false;
+        for (const auto& net : _known) {
+            if (net.ssid == ssid) {
+                known = true;
+                if (score > bestKnownScore) {
+                    bestKnownScore = score;
+                    knownSsid = net.ssid;
+                    knownPassword = net.password;
+                }
+                break;
+            }
+        }
+        if (!known && kAllowOpenNetworks &&
+            WiFi.encryptionType(i) == WIFI_AUTH_OPEN &&
+            rssi >= kMinOpenRssi && score > bestOpenScore) {
+            bestOpenScore = score;
+            openSsid = ssid;
+        }
+    }
+    WiFi.scanDelete();
+
+    String pickSsid, pickPassword;
+    if (!knownSsid.isEmpty()) {
+        pickSsid = knownSsid;
+        pickPassword = knownPassword;
+    } else if (!openSsid.isEmpty()) {
+        pickSsid = openSsid;
+    }
+    if (pickSsid.isEmpty()) {
+        Serial.printf("[WiFi] No known network in range (%d seen)\n", count);
+        _statusMessage = "No known Wi-Fi network in range";
+        _nextWifiRetryAt = millis() + 15000UL;
+        return;
+    }
+
+    _lastSsid = pickSsid;
+    _lastPassword = pickPassword;
+    Serial.printf("[WiFi] Auto-connecting: SSID=%s (%s)\n",
+                  pickSsid.c_str(), pickPassword.isEmpty() ? "open" : "known");
+    WiFi.disconnect(false, false);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(_lastSsid.c_str(), _lastPassword.c_str());
+    _wifiConnecting = true;
+    _connectStartedAt = millis();
+    _nextWifiRetryAt = _connectStartedAt + kWifiConnectTimeoutMs + 5000UL;
+    _statusMessage = "Connecting to " + pickSsid;
+}
+
 bool ConnectivityService::startWifiScan()
 {
+    cancelAutoScan();
     if (_wifiScanning || _bluetoothScanning) {
         _statusMessage = "Wait for the current scan to finish";
         return false;
@@ -120,8 +319,11 @@ bool ConnectivityService::startWifiScan()
 
     // Keep the radio up so MQTT and the backend stay connected during the scan.
     // Only a half-finished connect attempt is stopped, since it cannot run alongside a scan.
+    // Auto-reconnect is off so the driver does not restart the attempt and make the scan fail.
     if (WiFi.status() != WL_CONNECTED) {
+        WiFi.setAutoReconnect(false);
         WiFi.disconnect(false, false);
+        delay(300);
     }
     WiFi.scanDelete();
 
@@ -142,6 +344,7 @@ bool ConnectivityService::startWifiScan()
 
 bool ConnectivityService::startBluetoothScan()
 {
+    cancelAutoScan();
     if (_wifiScanning || _bluetoothScanning || _wifiConnecting) {
         _statusMessage = "Wait for the current scan to finish";
         return false;
@@ -171,6 +374,7 @@ bool ConnectivityService::startBluetoothScan()
 
 bool ConnectivityService::connectWifi(const String& ssid, const String& password)
 {
+    cancelAutoScan();
     if (ssid.isEmpty() || _wifiScanning || _bluetoothScanning) {
         _statusMessage = "Select a network after discovery has finished";
         return false;

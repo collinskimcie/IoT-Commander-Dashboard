@@ -8,6 +8,11 @@ struct BleResult {
     int rssi;
 };
 
+struct KnownNetwork {
+    String ssid;
+    String password;
+};
+
 class ConnectivityService {
 public:
     void begin();
@@ -31,6 +36,12 @@ private:
     static void bluetoothScanTask(void* parameter);
     void finishWifiScan();
     void finishBluetoothScan();
+    void loadKnownNetworks();
+    void saveKnownNetworks();
+    void rememberNetwork(const String& ssid, const String& password);
+    void startAutoScan();
+    void serviceAutoScan();
+    void cancelAutoScan();
 
     bool _wifiScanning = false;
     bool _bluetoothScanning = false;
@@ -41,6 +52,11 @@ private:
     uint32_t _nextWifiRetryAt = 0;
     String _lastSsid;
     String _lastPassword;
+    std::vector<KnownNetwork> _known;
+    bool _autoScanning = false;
+    uint32_t _autoScanStartedAt = 0;
+    uint8_t _failCount = 0;
+    String _lastFailedSsid;
     uint32_t _scanRevision = 0;
     String _statusMessage = "Ready to discover systems";
     std::vector<NearbyDevice> _nearbyDevices;
