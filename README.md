@@ -15,6 +15,8 @@ The project is designed as a reusable foundation for future IoT products, with s
 - [Repository structure](#repository-structure)
 - [Build and flash firmware](#build-and-flash-firmware)
 - [Configure the terminal](#configure-the-terminal)
+- [Developer tools](#developer-tools)
+- [Troubleshooting](#troubleshooting)
 - [.NET and PostgreSQL backend](#net-and-postgresql-backend)
 - [API reference](#api-reference)
 - [Security considerations](#security-considerations)
@@ -34,7 +36,7 @@ The firmware can operate without the backend. Backend reporting is an additional
 ```mermaid
 flowchart TB
     subgraph Device["ESP32-S3 Touchscreen Terminal"]
-        UI["LVGL UI<br/>Dashboard · Devices<br/>Alerts · Settings"]
+        UI["LVGL UI<br/>Dashboard · Devices<br/>Alerts · Settings · Tools"]
         APP["Application Layer<br/>Device Adapters<br/>Notifications · Domain"]
         CON["Connectivity Services<br/>Wi-Fi · BLE · MQTT/TLS<br/>NTP · Backend Reporting"]
         HAL["Platform Layer<br/>Display · Touch · LVGL Port"]
@@ -104,7 +106,7 @@ The MQTT broker is external to the included Docker Compose services. IoT Command
 
 ### Touchscreen interface
 
-- Modular Dashboard, Devices, Alerts, and Settings screens.
+- Modular Dashboard, Devices, Alerts, Settings, and Tools screens.
 - Display diagnostics including uptime, IP address, Wi-Fi signal strength, and free internal heap.
 - Touch-based configuration and notification review.
 - Separate screen modules and reusable UI components.
@@ -118,6 +120,22 @@ The MQTT broker is external to the included Docker Compose services. IoT Command
 - An adapter contract for future device-specific integrations.
 
 BLE discovery currently identifies nearby advertisements. It does not automatically pair with or control arbitrary Bluetooth peripherals.
+
+### Automatic server discovery
+
+- When the backend is unreachable, the terminal looks up its server by mDNS name (`<name>.local`) and accepts only an address on its own subnet.
+- If the lookup fails, it falls back to the addresses saved for the current Wi-Fi network.
+- After the backend has worked on a network for about 45 seconds, its addresses are saved for that network (up to five networks).
+- New addresses are applied through the normal settings path, so MQTT and the backend reconnect on their own.
+- The lookup runs at most once a minute and only while the backend is unreachable.
+- The server name is the `kServerName` constant in `src/connectivity/ServerLocator.cpp`; set it to your server's hostname.
+- Some hotspots block mDNS between clients. Saved addresses exist only for networks where discovery has worked once.
+- MQTT connects to the discovered IP address, so the broker certificate must list that IP. See [Broker certificate re-signing](#broker-certificate-re-signing).
+
+### Tools page and self-test
+
+- The Tools page (eye icon in the bottom bar) shows live checks for Wi-Fi, MQTT, backend, time, heap and PSRAM, the Wi-Fi signal strength and channel, and the readings currently received over MQTT.
+- The `SELFTEST` USB command prints the same checks as PASS/FAIL lines over serial.
 
 ### MQTT telemetry and commands
 
@@ -168,6 +186,7 @@ IoT Commander/
 │   │   ├── Domain.h
 │   │   ├── MqttService.h
 │   │   ├── NotificationCenter.h
+│   │   ├── ServerLocator.h
 │   │   ├── SettingsStore.h
 │   │   └── TimeService.h
 │   ├── platform/
@@ -184,6 +203,7 @@ IoT Commander/
 │   │   ├── BackendService.cpp
 │   │   ├── ConnectivityService.cpp
 │   │   ├── MqttService.cpp
+│   │   ├── ServerLocator.cpp
 │   │   └── TimeService.cpp
 │   ├── platform/
 │   │   └── LvglPort.cpp
@@ -194,7 +214,8 @@ IoT Commander/
 │   │   │   ├── AlertsScreen.cpp
 │   │   │   ├── DashboardScreen.cpp
 │   │   │   ├── DevicesScreen.cpp
-│   │   │   └── SettingsScreen.cpp
+│   │   │   ├── SettingsScreen.cpp
+│   │   │   └── ToolsScreen.cpp
 │   │   ├── UiComponents.cpp
 │   │   └── UiManager.cpp
 │   ├── lv_conf.h
@@ -207,6 +228,13 @@ IoT Commander/
 │   │   └── Dockerfile
 │   ├── docker-compose.yml
 │   └── .env                 # Local secrets; do not commit
+├── tools/
+│   ├── cert/
+│   │   └── resign-broker-cert.sh
+│   ├── provision/
+│   │   └── set-mqtt-password.py
+│   └── simulator/
+│       └── simulate.py
 ├── platformio.ini
 ├── .gitignore
 └── README.md
@@ -292,9 +320,109 @@ ip -4 addr
 
 Choose the address reachable from the terminal's Wi-Fi network, not `127.0.0.1`. The loopback address only refers to the computer making the request.
 
-The backend URL, API key, and optional backend root CA can also be provisioned over a trusted physical USB serial connection using the documented `CONFIGURE_BACKEND` command. Send `STATUS` to inspect connection and time status without revealing the API key.
+The backend URL, API key, and optional backend root CA can also be provisioned over a trusted physical USB serial connection using the documented `CONFIGURE_BACKEND` command. Send `STATUS` to inspect connection and time status without revealing the API key. Send `SELFTEST` to run the Tools-page health checks and print PASS/FAIL lines. MQTT settings can be provisioned the same way with `CONFIGURE_MQTT ` followed by a JSON object (`host`, `port`, `username`, `password`, `rootCa`, `telemetryTopic`, `commandTopic`); fields you leave out keep their saved values.
 
-## .NET and PostgreSQL backend
+## Developer tools
+
+The `tools/` folder holds PC-side helpers. None of them contain credentials: secrets come from environment variables.
+
+### Device simulator
+
+`tools/simulator/simulate.py` publishes fake telemetry to the broker, so you can test the terminal, alert rules and backend without real sensors.
+
+Setup:
+
+```bash
+pip install paho-mqtt
+cp <path-to-your-broker-ca>.crt tools/simulator/ca.crt   # public CA certificate; ignored by Git
+```
+
+Run (enter the credentials one command at a time; the password is not echoed):
+
+```bash
+read -rp "MQTT user: " MQTT_USER
+read -rsp "MQTT password: " MQTT_PASS; echo
+export MQTT_USER MQTT_PASS
+python3 tools/simulator/simulate.py --host <BROKER_IP> --cafile tools/simulator/ca.crt --scenario normal
+```
+
+Useful options: `--ids` (comma-separated device IDs), `--topic` (template, default `devices/{id}/telemetry`), `--fields`, `--interval`, `--duration`, and `--no-hostname-check` for local testing.
+
+| Scenario | Behavior |
+|---|---|
+| `normal` | Smoothly varying temperature and humidity |
+| `spike` | Periodic humidity and temperature spikes that trip alert rules |
+| `flatline` | Values freeze, like a stuck sensor |
+| `dropout` | Silence for 60 s out of every 120 s |
+| `burst` | 20 rapid messages once a minute |
+| `drift` | Temperature slowly rises |
+
+The terminal accepts a JSON object of numeric fields, so the simulator output works on any terminal subscribed to the topic.
+
+### Broker certificate re-signing
+
+The terminal connects to the broker by IP address, so the broker certificate must list that IP. On a new network the PC gets a new IP, and TLS fails until the certificate lists it.
+
+`tools/cert/resign-broker-cert.sh` is a NetworkManager dispatcher script for a Mosquitto broker on Linux. When the PC joins a network it re-signs the server certificate with the PC's current addresses, verifies the result, backs up the old certificate and restarts the broker (restoring the backup if the broker fails to start). It changes nothing when the certificate already lists every current address. The terminal trusts the CA, not the server certificate, so it needs no reflashing.
+
+It assumes `ca.crt`, `ca.key`, `server.csr` and `server.key` in `/etc/mosquitto/certs`. Install and test:
+
+```bash
+sudo install -m 755 -o root -g root tools/cert/resign-broker-cert.sh /etc/NetworkManager/dispatcher.d/90-iotcommander-cert
+sudo /etc/NetworkManager/dispatcher.d/90-iotcommander-cert --force
+journalctl -t iotcommander-cert -n 5
+```
+
+The script runs as root and uses the CA private key. Keep `ca.key` readable by root only. For production, use a proper CA or an automated certificate flow instead.
+
+### Changing the MQTT password
+
+1. Set the new password on the broker (omit `-c`, which would recreate the file and delete other users):
+
+   ```bash
+   sudo mosquitto_passwd /etc/mosquitto/passwd <user>
+   sudo systemctl restart mosquitto
+   ```
+
+2. Push it to the terminal over USB. Close any serial monitor first.
+
+   ```bash
+   read -rp "MQTT user: " MQTT_USER
+   read -rsp "MQTT password: " MQTT_PASS; echo
+   export MQTT_USER MQTT_PASS
+   pip install pyserial
+   python3 tools/provision/set-mqtt-password.py
+   ```
+
+   The script sends only the credentials, so the saved host, topics and certificate are kept. It prints the terminal's confirmation line, never the password.
+
+3. Update `include/app/MqttLocalConfig.h` if you rely on its build-time defaults.
+
+### Self-test over USB
+
+Type `SELFTEST` in the serial monitor:
+
+```text
+SELFTEST wifi     PASS  <ssid> <ip> rssi=<dBm>
+SELFTEST mqtt     PASS  <status>
+SELFTEST backend  PASS  <status>
+SELFTEST time     PASS  <local time>
+SELFTEST heap     PASS  free=<bytes> maxblock=<bytes>
+SELFTEST psram    PASS  free=<bytes>
+SELFTEST result: 6/6 passed
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---|---|
+| MQTT stays down after changing the broker password | The terminal still stores the old password. Update it in Settings or with `tools/provision/set-mqtt-password.py`. |
+| Repeating `setSocketOption ... Bad file number` lines | Usually the MQTT reconnect failing every few seconds. Fix the MQTT credentials or certificate. |
+| Simulator: `Permission denied` or `No such file` for the CA | The broker's certificate directory is usually not readable by your user. Copy the public `ca.crt` to `tools/simulator/ca.crt`. |
+| MQTT TLS fails on a new network | The broker certificate does not list the PC's new IP. Install the certificate re-signing script. |
+| Terminal does not find its server on a hotspot | The hotspot may block mDNS between clients. Check that `avahi-daemon` runs on the server, or enter the address manually. |
+| `Unknown USB command` right after opening the serial monitor | Usually stray bytes from the serial terminal attaching. Harmless. |
+
 
 ### Prerequisites
 
