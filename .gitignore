@@ -57,3 +57,4 @@ build/
 core.bin
 pt.bin
 releases/
+tools/simulator/ca.crt
