@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <esp_system.h>
 #include <ArduinoJson.h>
 #include <esp_display_panel.hpp>
@@ -261,6 +262,28 @@ void configureMqttFromUsb(const char* json)
 
 void configureBackendFromUsb(const char* command)
 {
+    if (std::strcmp(command, "SELFTEST") == 0) {
+        int passed = 0;
+        int total = 0;
+        const auto report = [&](const char* name, bool ok, const String& detail) {
+            ++total;
+            if (ok) {
+                ++passed;
+            }
+            Serial.printf("SELFTEST %-8s %s  %s\n", name, ok ? "PASS" : "FAIL", detail.c_str());
+        };
+        report("wifi", connectivity.wifiConnected(),
+            connectivity.wifiSsid() + " " + connectivity.ipAddress() + " rssi=" + String(WiFi.RSSI()));
+        report("mqtt", mqtt.connected(), mqtt.status());
+        report("backend", backendStatus() == BackendStatus::Ok, String(backendStatusName()));
+        report("time", timeService.synchronized(), timeService.localTime());
+        report("heap", ESP.getFreeHeap() > 60000 && ESP.getMaxAllocHeap() > 30000,
+            "free=" + String(ESP.getFreeHeap()) + " maxblock=" + String(ESP.getMaxAllocHeap()));
+        report("psram", ESP.getFreePsram() > 1000000, "free=" + String(ESP.getFreePsram()));
+        Serial.printf("SELFTEST result: %d/%d passed\n", passed, total);
+        return;
+    }
+
     if (std::strcmp(command, "STATUS") == 0) {
         const TerminalSettings& terminalSettings = settings.terminalSettings();
         Serial.printf(

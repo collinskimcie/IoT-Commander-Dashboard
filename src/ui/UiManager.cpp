@@ -106,7 +106,8 @@ bool UiManager::begin()
         {AppPage::Dashboard, LV_SYMBOL_HOME},
         {AppPage::Devices, LV_SYMBOL_LIST},
         {AppPage::Alerts, LV_SYMBOL_BELL},
-        {AppPage::Settings, LV_SYMBOL_SETTINGS}
+        {AppPage::Settings, LV_SYMBOL_SETTINGS},
+        {AppPage::Tools, LV_SYMBOL_EYE_OPEN}
     };
     for (const auto& entry : entries) {
         lv_obj_t* button = lv_btn_create(_navigation);
@@ -276,6 +277,8 @@ const ScreenModule& UiManager::moduleFor(AppPage page) const
         return alertsScreen();
     case AppPage::Settings:
         return settingsScreen();
+    case AppPage::Tools:
+        return toolsScreen();
     }
     return dashboardScreen();
 }

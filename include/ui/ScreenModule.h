@@ -12,7 +12,8 @@ enum class AppPage : uint8_t {
     Dashboard,
     Devices,
     Alerts,
-    Settings
+    Settings,
+    Tools
 };
 
 struct ScreenContext {
@@ -38,3 +39,4 @@ const ScreenModule& dashboardScreen();
 const ScreenModule& devicesScreen();
 const ScreenModule& alertsScreen();
 const ScreenModule& settingsScreen();
+const ScreenModule& toolsScreen();
