@@ -54,3 +54,6 @@ web-dashboard/dist/
 .env
 *.bak
 build/
+core.bin
+pt.bin
+releases/
