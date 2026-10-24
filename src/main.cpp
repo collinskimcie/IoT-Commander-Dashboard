@@ -8,6 +8,7 @@
 #include "app/MqttService.h"
 #include "app/NotificationCenter.h"
 #include "app/SettingsStore.h"
+#include "app/ServerLocator.h"
 #include "app/TimeService.h"
 #include "app/SlowGuard.h"
 #include "platform/LvglPort.h"
@@ -41,6 +42,7 @@ esp_panel::board::Board board;
 ConnectivityService connectivity;
 NotificationCenter notifications;
 SettingsStore settings;
+ServerLocator serverLocator;
 MqttService mqtt;
 BackendService backend;
 TimeService timeService;
@@ -476,6 +478,27 @@ void loop()
     if (millis() - lastSnapshotAt >= 500) {
         lastSnapshotAt = millis();
         refreshBackendSnapshot(wifiConnected);
+
+        static bool locatorStarted = false;
+        if (!locatorStarted) {
+            serverLocator.begin();
+            locatorStarted = true;
+        }
+        serverLocator.update(settings.terminalSettings(), settings.mqttSettings(),
+                             backendStatus() == BackendStatus::Ok);
+        String newBackendHost;
+        String newMqttHost;
+        if (serverLocator.takeChange(newBackendHost, newMqttHost)) {
+            TerminalSettings terminalUpdate = settings.terminalSettings();
+            terminalUpdate.backendUrl = ServerLocator::withHost(terminalUpdate.backendUrl, newBackendHost);
+            MqttSettings mqttUpdate = settings.mqttSettings();
+            mqttUpdate.host = newMqttHost;
+            const bool terminalSaved = settings.setTerminalSettings(terminalUpdate);
+            const bool mqttSaved = settings.setMqttSettings(mqttUpdate);
+            Serial.printf("[Server] Applied backend=%s mqtt=%s (saved: %s/%s)\n",
+                newBackendHost.c_str(), newMqttHost.c_str(),
+                terminalSaved ? "ok" : "FAIL", mqttSaved ? "ok" : "FAIL");
+        }
     }
 
     {
