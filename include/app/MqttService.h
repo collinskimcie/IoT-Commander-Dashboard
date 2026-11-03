@@ -33,6 +33,18 @@ public:
     // Queues the command; the network task publishes it. False if not connected.
     bool publishCommand(bool enabled);
 
+    // Recent incoming messages, for the Tools page inspector.
+    struct MessageTrace {
+        char topic[48];
+        char text[40];
+        uint16_t length;
+        uint32_t receivedAt;   // millis()
+    };
+    static constexpr size_t kTraceCount = 8;
+    // UI thread: copies up to `max` messages, newest first. Returns how many.
+    size_t recentMessages(MessageTrace* out, size_t max) const;
+    uint32_t messageTotal() const;
+
 private:
     struct PendingNote {
         String title;
@@ -46,6 +58,7 @@ private:
     bool settingsChanged(const MqttSettings& settings) const;
     void setStatus(const String& status);
     void notify(const String& title, const String& message);
+    void recordMessage(const char* topic, const uint8_t* payload, unsigned int length);
 
     WiFiClientSecure _network;
     PubSubClient _client{_network};
@@ -67,6 +80,9 @@ private:
     SemaphoreHandle_t _lock = nullptr;
     std::vector<PendingNote> _pendingNotes;   // guarded by _lock
     std::atomic<bool> _connected{false};
+    std::array<MessageTrace, kTraceCount> _trace{};   // guarded by _lock
+    size_t _traceNext = 0;                            // guarded by _lock
+    uint32_t _messageTotal = 0;                       // guarded by _lock
     std::atomic<bool> _hasCommandTopic{false};
     std::atomic<int8_t> _pendingCommand{-1};  // -1 none, 0 OFF, 1 ON
 };

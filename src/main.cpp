@@ -10,6 +10,7 @@
 #include "app/NotificationCenter.h"
 #include "app/SettingsStore.h"
 #include "app/ServerLocator.h"
+#include "app/NetDiag.h"
 #include "app/TimeService.h"
 #include "app/SlowGuard.h"
 #include "platform/LvglPort.h"
@@ -281,6 +282,15 @@ void configureBackendFromUsb(const char* command)
             "free=" + String(ESP.getFreeHeap()) + " maxblock=" + String(ESP.getMaxAllocHeap()));
         report("psram", ESP.getFreePsram() > 1000000, "free=" + String(ESP.getFreePsram()));
         Serial.printf("SELFTEST result: %d/%d passed\n", passed, total);
+        return;
+    }
+
+    if (std::strcmp(command, "DIAG") == 0) {
+        if (NetDiag::start(settings.mqttSettings(), settings.terminalSettings(), true)) {
+            Serial.println("DIAG: running, results follow in a few seconds");
+        } else {
+            Serial.println("DIAG: not started (already running, or Wi-Fi is down)");
+        }
         return;
     }
 

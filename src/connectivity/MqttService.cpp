@@ -320,6 +320,7 @@ void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsig
     }
 
     Serial.printf("[MQTT] RX topic='%s' length=%u\n", topic, length);
+    recordMessage(topic, payload, length);
 
     if (!topicMatches(_settings.telemetryTopic, topic)) {
         Serial.printf("[MQTT] Ignored: topic does not match configured filter '%s'\n",
@@ -403,6 +404,45 @@ void MqttService::handleMessage(const char* topic, const uint8_t* payload, unsig
             }
         }
     }
+}
+
+void MqttService::recordMessage(const char* topic, const uint8_t* payload, unsigned int length)
+{
+    MessageTrace entry{};
+    snprintf(entry.topic, sizeof(entry.topic), "%s", topic);
+    const size_t preview = length < sizeof(entry.text) - 1 ? length : sizeof(entry.text) - 1;
+    for (size_t index = 0; index < preview; ++index) {
+        const uint8_t character = payload != nullptr ? payload[index] : '.';
+        entry.text[index] = (character >= 32 && character < 127) ? static_cast<char>(character) : '.';
+    }
+    entry.text[preview] = '\0';
+    entry.length = length > 65535 ? 65535 : static_cast<uint16_t>(length);
+    entry.receivedAt = millis();
+
+    Guard guard(_lock);
+    _trace[_traceNext] = entry;
+    _traceNext = (_traceNext + 1) % kTraceCount;
+    ++_messageTotal;
+}
+
+size_t MqttService::recentMessages(MessageTrace* out, size_t max) const
+{
+    Guard guard(_lock);
+    size_t count = 0;
+    for (size_t index = 0; index < kTraceCount && count < max; ++index) {
+        const size_t slot = (_traceNext + kTraceCount - 1 - index) % kTraceCount;
+        if (_trace[slot].topic[0] == '\0') {
+            break;
+        }
+        out[count++] = _trace[slot];
+    }
+    return count;
+}
+
+uint32_t MqttService::messageTotal() const
+{
+    Guard guard(_lock);
+    return _messageTotal;
 }
 
 void MqttService::updateReading(const char* name, float value)
